@@ -1,0 +1,35 @@
+# ---- Java / Maven ----
+backend/target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# ---- Local database (H2 file mode) ----
+backend/data/
+*.mv.db
+*.trace.db
+
+# ---- Node / Vite ----
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-error.log*
+
+# ---- Secrets & local config ----
+.env
+.env.local
+.env.*.local
+frontend/.env
+backend/src/main/resources/application-local.yml
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ---- Logs ----
+*.log
+logs/

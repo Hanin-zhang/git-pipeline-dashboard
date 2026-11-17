@@ -1,0 +1,123 @@
+# GitHub Look —— 生产部署编排
+#
+# 启动：  cp .env.docker.example .env  →  填值  →  docker compose up -d --build
+# 日志：  docker compose logs -f backend
+# 停止：  docker compose down          （加 -v 会删除数据库卷，慎用）
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ghl-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请先在 .env 里设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-github_look}
+      MYSQL_USER: ${MYSQL_USER:-githublook}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请先在 .env 里设置 MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      - --max_connections=200
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks: [ghl]
+
+  redis:
+    image: redis:7-alpine
+    container_name: ghl-redis
+    restart: unless-stopped
+    # AOF: 幂等键与队列在重启后不至于全丢（DB 唯一索引仍是最终兜底）
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [ghl]
+
+  backend:
+    image: github-look-backend:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    container_name: ghl-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # --- 数据库（Flyway 自动建表，无需手工执行 SQL）---
+      DB_URL: "jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-github_look}?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8&allowPublicKeyRetrieval=true"
+      DB_USERNAME: ${MYSQL_USER:-githublook}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_DRIVER: com.mysql.cj.jdbc.Driver
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+
+      # --- Redis ---
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+
+      # --- Webhook ---
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?请先在 .env 里设置 GITHUB_WEBHOOK_SECRET}
+      WEBHOOK_AUTO_REGISTER: ${WEBHOOK_AUTO_REGISTER:-false}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?请设置 PUBLIC_BASE_URL，例如 https://look.example.com}
+
+      # --- 登录与设置页门禁 ---
+      APP_JWT_SECRET: ${APP_JWT_SECRET:?请用 openssl rand -hex 32 生成}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请设置 ADMIN_PASSWORD}
+      SETTINGS_ACCESS_PASSWORD: ${SETTINGS_ACCESS_PASSWORD:?请设置 SETTINGS_ACCESS_PASSWORD}
+      SETTINGS_TOKEN_TTL: ${SETTINGS_TOKEN_TTL:-PT30M}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost}
+
+      # --- 可选：GitHub API（重跑 / 取消）---
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+
+      # --- 运行参数 ---
+      QUEUE_CONSUMERS: ${QUEUE_CONSUMERS:-8}
+      DEMO_DATA_ENABLED: ${DEMO_DATA_ENABLED:-false}
+      APP_ZONE: ${APP_ZONE:-Asia/Shanghai}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TZ: Asia/Shanghai
+    expose:
+      - "8080"
+    # 需要直连后端调试时再打开（生产建议只走 nginx）
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+    networks: [ghl]
+
+  web:
+    image: github-look-web:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.frontend
+    container_name: ghl-web
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${WEB_PORT:-80}:80"
+    networks: [ghl]
+
+volumes:
+  mysql-data:
+  redis-data:
+
+networks:
+  ghl:
+    driver: bridge

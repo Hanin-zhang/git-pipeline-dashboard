@@ -1,0 +1,138 @@
+spring:
+  application:
+    name: github-look
+
+  # JDK 21 virtual threads: every blocking request / @Async task runs on a virtual thread
+  threads:
+    virtual:
+      enabled: true
+
+  datasource:
+    # Local default: H2 in MySQL compatibility mode. Switch to MySQL by overriding DB_* env vars.
+    url: ${DB_URL:jdbc:h2:file:./data/githublook;MODE=MySQL;DATABASE_TO_LOWER=TRUE}
+    username: ${DB_USERNAME:sa}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      pool-name: githublook-pool
+
+  # Schema is owned by Flyway; MyBatis-Plus never generates DDL.
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2s
+      connect-timeout: 2s
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  compression:
+    enabled: true
+    # text/event-stream is intentionally NOT compressed: gzip buffering delays SSE frames.
+    mime-types: application/json,text/html,text/css,application/javascript
+  forward-headers-strategy: framework
+  error:
+    include-message: never
+    include-stacktrace: never
+
+mybatis-plus:
+  mapper-locations: classpath*:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+    # Never leak raw SQL parameter values into logs.
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      # Every table has created_at / updated_at written by the service layer, not by MP magic.
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  health:
+    redis:
+      enabled: true
+
+logging:
+  level:
+    root: INFO
+    com.githublook: ${LOG_LEVEL:INFO}
+
+app:
+  # Shown on the Settings page so users can copy a URL GitHub can actually reach.
+  public-base-url: ${PUBLIC_BASE_URL:http://123.56.106.44:8188}
+  zone-id: ${APP_ZONE:Asia/Shanghai}
+  # GitHub REST API：配置 token 后才能重跑 / 取消 / 拉日志 / 拉产物。
+  # 留空则相关按钮在页面上置灰，接口返回 503 并说明原因，不会伪造成功。
+  github:
+    token: ${GITHUB_TOKEN:}
+    api-url: ${GITHUB_API_URL:https://api.github.com}
+    user-agent: ${GITHUB_USER_AGENT:github-look}
+    connect-timeout: PT3S
+    read-timeout: PT10S
+  webhook:
+    # Public path GitHub posts to. Also rendered in the Settings page.
+    path: /api/webhooks/github
+    signature-header: X-Hub-Signature-256
+    delivery-header: X-GitHub-Delivery
+    event-header: X-GitHub-Event
+    max-payload-bytes: 1048576
+    # Optional global fallback secret; per-repo secrets take precedence.
+    default-secret: ${GITHUB_WEBHOOK_SECRET:hanin-github}
+    # Unknown repos are registered on their first valid delivery (needs default-secret above).
+    auto-register: ${WEBHOOK_AUTO_REGISTER:true}
+  idempotency:
+    key-prefix: "githublook:delivery:"
+    ttl: PT24H
+  queue:
+    key: "githublook:webhook:queue"
+    processing-key: "githublook:webhook:queue:processing"
+    dead-letter-key: "githublook:webhook:queue:dead"
+    consumers: ${QUEUE_CONSUMERS:8}
+    poll-interval: PT0.05S
+    max-attempts: 3
+  security:
+    jwt-secret: ${APP_JWT_SECRET:dev-only-secret-please-override-with-32bytes-minimum}
+    access-token-ttl: PT8H
+    cookie-name: gl_session
+    cookie-secure: ${COOKIE_SECURE:false}
+    allowed-origins: ${ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+    admin-username: ${ADMIN_USERNAME:admin}
+    admin-password: ${ADMIN_PASSWORD:admin123}
+    # 「设置与接入」页的二次验证密码：与登录密码独立，通过环境变量注入
+    settings-password: ${SETTINGS_ACCESS_PASSWORD:settings123}
+    # 解锁有效期，到期后页面自动回到输入密码状态
+    settings-token-ttl: ${SETTINGS_TOKEN_TTL:PT30M}
+    settings-cookie-name: gl_settings
+  stats:
+    cache-ttl: PT20S
+  demo:
+    enabled: ${DEMO_DATA_ENABLED:true}
+    days: 7
+    reset: false

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.githublook.run.mapper.WorkflowRunMapper">
+
+    <sql id="windowFilters">
+        AND started_at &gt;= #{from}
+        AND started_at &lt; #{to}
+        <if test="repo != null and repo != ''">
+            AND repo_full_name = #{repo}
+        </if>
+        <if test="branch != null and branch != ''">
+            AND branch = #{branch}
+        </if>
+    </sql>
+
+    <!-- Aggregate counters for a single time window. Portable across MySQL / H2(MySQL mode). -->
+    <select id="aggregate" resultType="com.githublook.stats.model.AggregateRow">
+        SELECT
+            COUNT(*) AS total,
+            COALESCE(SUM(CASE WHEN conclusion = 'success' THEN 1 ELSE 0 END), 0) AS success_count,
+            COALESCE(SUM(CASE WHEN conclusion IN ('failure', 'timed_out', 'startup_failure') THEN 1 ELSE 0 END), 0) AS failed_count,
+            COALESCE(SUM(CASE WHEN status IN ('queued', 'in_progress', 'requested', 'waiting', 'pending') THEN 1 ELSE 0 END), 0) AS running_count,
+            AVG(CASE WHEN duration_ms IS NOT NULL AND duration_ms &gt; 0 THEN duration_ms END) AS avg_duration_ms
+        FROM workflow_run
+        WHERE 1 = 1
+        <include refid="windowFilters"/>
+    </select>
+
+    <!-- One row per day that actually has finished runs; the service fills empty days. -->
+    <select id="dailyStats" resultType="com.githublook.stats.model.DailyStatRow">
+        SELECT
+            CAST(started_at AS DATE) AS stat_day,
+            COUNT(*) AS total,
+            COALESCE(SUM(CASE WHEN conclusion = 'success' THEN 1 ELSE 0 END), 0) AS success_count,
+            COALESCE(SUM(CASE WHEN conclusion IN ('failure', 'timed_out', 'startup_failure') THEN 1 ELSE 0 END), 0) AS failed_count,
+            COALESCE(SUM(CASE WHEN conclusion IN ('cancelled', 'skipped', 'stale') THEN 1 ELSE 0 END), 0) AS cancelled_count,
+            AVG(CASE WHEN duration_ms IS NOT NULL AND duration_ms &gt; 0 THEN duration_ms END) AS avg_duration_ms
+        FROM workflow_run
+        WHERE conclusion IS NOT NULL
+        <include refid="windowFilters"/>
+        GROUP BY CAST(started_at AS DATE)
+        ORDER BY stat_day ASC
+    </select>
+
+    <!-- Noisiest workflows in the window: highest failure count first. -->
+    <select id="workflowStats" resultType="com.githublook.stats.model.WorkflowStatRow">
+        SELECT
+            workflow_name AS workflow_name,
+            COUNT(*) AS total,
+            COALESCE(SUM(CASE WHEN conclusion IN ('failure', 'timed_out', 'startup_failure') THEN 1 ELSE 0 END), 0) AS failed_count,
+            AVG(CASE WHEN duration_ms IS NOT NULL AND duration_ms &gt; 0 THEN duration_ms END) AS avg_duration_ms
+        FROM workflow_run
+        WHERE conclusion IS NOT NULL
+        <include refid="windowFilters"/>
+        GROUP BY workflow_name
+        ORDER BY failed_count DESC, total DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="distinctBranches" resultType="java.lang.String">
+        SELECT branch FROM (
+            SELECT branch, MAX(started_at) AS last_seen
+            FROM workflow_run
+            WHERE branch IS NOT NULL
+            GROUP BY branch
+        ) t
+        ORDER BY last_seen DESC
+        LIMIT #{limit}
+    </select>
+
+</mapper>
