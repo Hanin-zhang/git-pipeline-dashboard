@@ -40,6 +40,11 @@ export const runsApi = {
     to?: string
   }) => api.get<PageResponse<RunSummary>>(`/runs${query(params)}`),
   detail: (id: number | string) => api.get<RunDetail>(`/runs/${id}`),
+  /** 真实事件不带 jobs，这里按需从 Actions API 拉一次 */
+  syncJobs: (id: number) =>
+    api.post<{ runId: number; jobs: number; message: string }>(`/runs/${id}/sync-jobs`),
+  /** 单个 job 的执行日志（纯文本） */
+  jobLogs: (runId: number, jobId: number) => api.getText(`/runs/${runId}/jobs/${jobId}/logs`),
   filters: () => api.get<RunFilters>('/runs/filters'),
   rerun: (id: number) => api.post<RunActionResult>(`/runs/${id}/rerun`),
   cancel: (id: number) => api.post<RunActionResult>(`/runs/${id}/cancel`),

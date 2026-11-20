@@ -46,8 +46,12 @@ const slowestStep = computed(() => {
   return best as { job: string; name: string; duration: number } | null
 })
 
+const FAILED = ['failure', 'timed_out', 'startup_failure']
+
 const finishedHistory = computed(() =>
-  props.history.filter((item) => item.conclusion === 'success' || item.conclusion === 'failure'),
+  props.history.filter(
+    (item) => item.conclusion === 'success' || FAILED.includes(item.conclusion ?? ''),
+  ),
 )
 
 const historyStats = computed(() => {
@@ -110,8 +114,8 @@ const historyStats = computed(() => {
 
   <div class="history-strip">
     <template v-if="historyStats">
-      <span class="hist-item">
-        最近 {{ historyStats.count }} 次成功率
+      <span class="hist-item" title="统计的是本次之前同 workflow 的历史运行，不含当前这条">
+        前 {{ historyStats.count }} 次成功率
         <b :class="historyStats.rate >= 80 ? 'ok' : historyStats.rate >= 50 ? 'warn' : 'bad'">
           {{ percent(historyStats.rate) }}
         </b>

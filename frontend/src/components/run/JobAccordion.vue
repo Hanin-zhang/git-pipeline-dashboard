@@ -76,7 +76,7 @@ function openGithub(url?: string) {
             <div class="step-main">
               <el-icon
                 class="step-icon"
-                :class="`tone-${stepTone(step)}`"
+                :class="[`tone-${stepTone(step)}`, { spinning: stepTone(step) === 'running' }]"
               >
                 <CircleCheck v-if="stepTone(step) === 'success'" />
                 <CircleClose v-else-if="stepTone(step) === 'failure'" />
@@ -246,6 +246,16 @@ function openGithub(url?: string) {
 }
 .step-icon.tone-running {
   color: #1677ff;
+}
+
+.step-icon.spinning {
+  animation: step-spin 1s linear infinite;
+}
+
+@keyframes step-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .step-icon.tone-cancelled {
   color: #fa8c16;

@@ -17,7 +17,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.security.SecureRandom;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
@@ -43,12 +45,16 @@ public class RepoService {
                 .stream().map(MonitoredRepo::getFullName).toList();
     }
 
+    /**
+     * GitHub 的 owner/repo 大小写不敏感，这里统一用小写比较，
+     * 避免用户填了不同大小写导致 webhook 匹配不上（H2 默认区分大小写）。
+     */
     public Optional<MonitoredRepo> findByFullName(String fullName) {
         if (fullName == null || fullName.isBlank()) {
             return Optional.empty();
         }
         return Optional.ofNullable(repoMapper.selectOne(new LambdaQueryWrapper<MonitoredRepo>()
-                .eq(MonitoredRepo::getFullName, fullName)
+                .apply("LOWER(full_name) = {0}", fullName.trim().toLowerCase(Locale.ROOT))
                 .last("LIMIT 1")));
     }
 
@@ -82,9 +88,44 @@ public class RepoService {
         return repo;
     }
 
+    private static final Pattern REPO_SLUG = Pattern.compile("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$");
+
+    /**
+     * 把用户输入归一化成 {@code owner/repo}。支持这些写法：
+     * <pre>
+     *   owner/repo
+     *   https://github.com/owner/repo
+     *   https://github.com/owner/repo.git
+     *   https://github.com/owner/repo/tree/main
+     *   git@github.com:owner/repo.git
+     * </pre>
+     * 解析失败直接 400，避免把脏数据写进库导致 webhook 永远匹配不上。
+     */
+    public static String normalizeFullName(String raw) {
+        if (raw == null || raw.isBlank()) {
+            throw AppException.badRequest("请填写仓库地址，例如 owner/repo 或 https://github.com/owner/repo");
+        }
+        String value = raw.trim().replaceAll("\\s+", "");
+        value = value.replaceAll("[?#].*$", "");
+        value = value.replaceAll("^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/", "");
+        value = value.replaceAll("^git@[^:]+:", "");
+        value = value.replaceAll("\\.git$", "");
+        value = value.replaceAll("/+$", "");
+
+        String[] parts = value.split("/");
+        if (parts.length < 2) {
+            throw AppException.badRequest("仓库地址需要包含 owner 和仓库名，例如 Hanin-zhang/git-pipeline-dashboard");
+        }
+        String fullName = parts[0] + "/" + parts[1];
+        if (!REPO_SLUG.matcher(fullName).matches()) {
+            throw AppException.badRequest("仓库地址格式不正确：" + raw.trim());
+        }
+        return fullName;
+    }
+
     @Transactional
     public RepoDto create(CreateRepoRequest request) {
-        String fullName = request.fullName().trim();
+        String fullName = normalizeFullName(request.fullName());
         if (findByFullName(fullName).isPresent()) {
             throw AppException.conflict("仓库 " + fullName + " 已接入");
         }

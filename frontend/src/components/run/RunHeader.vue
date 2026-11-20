@@ -119,7 +119,7 @@ const DISABLED_HINT = '未配置 GITHUB_TOKEN：后端不会伪造成功，配�
 
     <div class="head-meta">
       <button class="meta-chip" :title="'点击复制完整 SHA'" @click="copy(run?.commitSha, 'Commit SHA')">
-        <el-icon><Commit /></el-icon>
+        <el-icon><Tickets /></el-icon>
         <span class="mono">{{ shortSha(run?.commitSha) }}</span>
         <el-icon class="chip-copy"><CopyDocument /></el-icon>
       </button>

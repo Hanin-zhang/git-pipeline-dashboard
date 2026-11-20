@@ -27,6 +27,7 @@ public class WebhookEventProcessor {
     private final SseHub sseHub;
     private final StatsCache statsCache;
     private final com.githublook.settings.AlertNotifier alertNotifier;
+    private final com.githublook.github.GithubJobSyncService jobSyncService;
 
     public void process(QueueMessage message) {
         switch (message.eventName()) {
@@ -50,6 +51,10 @@ public class WebhookEventProcessor {
         String repoFullName = resolveRepo(message, event.repository() == null ? null : event.repository().fullName());
         RunWriteService.UpsertOutcome outcome =
                 runWriteService.upsert(event.run(), repoFullName, message.deliveryId());
+
+        // 真实事件不带 jobs：配置了 token 就顺带把 job/step 拉回来，否则看板只有一个空壳 run
+        java.util.List<com.githublook.webhook.payload.GithubJob> payloadJobs = event.run().jobs();
+        jobSyncService.fillIfMissing(outcome.run(), payloadJobs != null && !payloadJobs.isEmpty());
 
         statsCache.invalidate();
         sseHub.broadcast(eventName(outcome), toPayload(outcome.run()));

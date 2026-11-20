@@ -1,0 +1,36 @@
+[Unit]
+Description=GitHub Look backend (CI/CD dashboard)
+Documentation=https://github.com/your-org/github-look
+After=network-online.target mysql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ghl
+Group=ghl
+WorkingDirectory=/opt/github-look/backend
+EnvironmentFile=/opt/github-look/.env
+
+# JAVA_OPTS 来自 .env，systemd 会按空格拆成多个参数
+ExecStart=/usr/bin/java $JAVA_OPTS -jar /opt/github-look/backend/github-look-backend-1.1.0.jar
+
+Restart=always
+RestartSec=5
+# JVM 收到 SIGTERM 后正常退出码是 143，不应算失败
+SuccessExitStatus=143
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=githublook
+
+# 基础加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/github-look
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

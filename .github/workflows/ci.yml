@@ -1,0 +1,279 @@
+name: CI
+
+# 触发：主分支推送、PR、手动运行
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支上的新提交会取消上一轮未完成的构建，省额度也省等待
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "21"
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------- 探测
+  # 先判断仓库里有哪些模块、哪些 npm 脚本真的存在。
+  # 后续 job 用 if 挂在这些输出上，模块缺失就跳过而不是报红。
+  detect:
+    name: 探测模块
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      backend: ${{ steps.probe.outputs.backend }}
+      frontend: ${{ steps.probe.outputs.frontend }}
+      frontend_typecheck: ${{ steps.probe.outputs.frontend_typecheck }}
+      frontend_test: ${{ steps.probe.outputs.frontend_test }}
+      frontend_build: ${{ steps.probe.outputs.frontend_build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查目录与 npm scripts
+        id: probe
+        run: |
+          set -euo pipefail
+
+          if [ -f backend/pom.xml ]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"; echo "✔ backend/pom.xml"
+          else
+            echo "backend=false" >> "$GITHUB_OUTPUT"; echo "· 未找到 backend/pom.xml，后端相关任务将跳过"
+          fi
+
+          if [ -f frontend/package.json ]; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"; echo "✔ frontend/package.json"
+            for s in typecheck test build; do
+              if node -e "process.exit(require('./frontend/package.json').scripts?.['$s'] ? 0 : 1)"; then
+                echo "frontend_${s}=true" >> "$GITHUB_OUTPUT"; echo "✔ npm script: $s"
+              else
+                echo "frontend_${s}=false" >> "$GITHUB_OUTPUT"; echo "· 无 npm script: $s（对应步骤将跳过）"
+              fi
+            done
+          else
+            echo "frontend=false" >> "$GITHUB_OUTPUT"; echo "· 未找到 frontend/package.json，前端相关任务将跳过"
+            for s in typecheck test build; do echo "frontend_${s}=false" >> "$GITHUB_OUTPUT"; done
+          fi
+
+  # ---------------------------------------------------------------- 后端
+  backend:
+    name: Java · 构建与单元测试
+    needs: detect
+    if: needs.detect.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 21 并缓存 Maven 依赖
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: 编译 + 单元测试
+        # verify = compile + test + package（含 spring-boot repackage）
+        # 没有任何测试用例时 Maven 仍然成功，不会误报
+        run: mvn -B -ntp verify
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          # 注意：artifact 的 path 相对仓库根目录，不受 defaults.run 影响
+          path: backend/target/surefire-reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------- 前端
+  frontend:
+    name: Web · 类型检查与单元测试
+    needs: detect
+    if: needs.detect.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node 22 并缓存 npm
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ci 严格按 lockfile 安装，lock 与 package.json 不一致会直接失败
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查
+        if: needs.detect.outputs.frontend_typecheck == 'true'
+        run: npm run typecheck
+
+      - name: 跳过类型检查
+        if: needs.detect.outputs.frontend_typecheck != 'true'
+        run: echo "::notice::frontend 未配置 typecheck 脚本，已跳过"
+
+      - name: 单元测试
+        if: needs.detect.outputs.frontend_test == 'true'
+        run: npm run test
+
+      - name: 跳过单元测试
+        if: needs.detect.outputs.frontend_test != 'true'
+        run: echo "::warning::frontend 未配置 test 脚本，已跳过单元测试（开启方式：加 vitest 依赖并在 package.json 声明 scripts.test）"
+
+      - name: 生产构建
+        if: needs.detect.outputs.frontend_build == 'true'
+        run: npm run build
+
+      - name: 上传构建产物
+        if: needs.detect.outputs.frontend_build == 'true' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
+
+  # ---------------------------------------------------------------- 冒烟
+  smoke:
+    name: 冒烟 · 真实启动与接口校验
+    needs: [detect, backend]
+    if: needs.detect.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: 打包（测试已在 backend job 跑过）
+        working-directory: backend
+        run: mvn -B -ntp -DskipTests package
+
+      - name: 启动并等待健康检查通过
+        env:
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: "6379"
+          # 冒烟用固定值即可，都是 runner 内的临时环境
+          APP_JWT_SECRET: ci-smoke-secret-at-least-32-characters-long
+          ADMIN_USERNAME: admin
+          ADMIN_PASSWORD: admin12345
+          SETTINGS_ACCESS_PASSWORD: settings12345
+          GITHUB_WEBHOOK_SECRET: ci-smoke-secret
+          PUBLIC_BASE_URL: http://127.0.0.1:8080
+          DEMO_DATA_ENABLED: "false"
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          jar=$(ls target/github-look-backend-*.jar | head -1)
+          echo "启动 $jar"
+          java -jar "$jar" > /tmp/app.log 2>&1 &
+          echo $! > /tmp/app.pid
+
+          ready=0
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:8080/actuator/health >/dev/null 2>&1; then
+              echo "✅ 应用就绪（约 $((i * 2)) 秒）"; ready=1; break
+            fi
+            if ! kill -0 "$(cat /tmp/app.pid)" 2>/dev/null; then
+              echo "❌ 进程已退出"; tail -100 /tmp/app.log; exit 1
+            fi
+            sleep 2
+          done
+          [ "$ready" = "1" ] || { echo "❌ 90 秒内未就绪"; tail -100 /tmp/app.log; exit 1; }
+
+          curl -fsS http://127.0.0.1:8080/actuator/health
+
+      - name: 校验关键接口
+        env:
+          ADMIN_PASSWORD: admin12345
+          SETTINGS_ACCESS_PASSWORD: settings12345
+        run: |
+          set -euo pipefail
+          B=http://127.0.0.1:8080
+
+          # 未登录访问受保护接口 -> 401
+          code=$(curl -s -o /dev/null -w '%{http_code}' $B/api/auth/me)
+          [ "$code" = "401" ] || { echo "期望 401，实际 $code"; exit 1; }
+
+          # 登录 -> 200
+          code=$(curl -s -o /dev/null -w '%{http_code}' -c /tmp/ck.txt \
+            -X POST $B/api/auth/login -H 'Content-Type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PASSWORD\"}")
+          [ "$code" = "200" ] || { echo "登录失败，实际 $code"; exit 1; }
+
+          # 列表接口 -> 200
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/ck.txt "$B/api/runs?page=1&size=5")
+          [ "$code" = "200" ] || { echo "运行列表异常，实际 $code"; exit 1; }
+
+          # 设置页未解锁 -> 403（门禁生效）
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/ck.txt $B/api/settings)
+          [ "$code" = "403" ] || { echo "门禁失效，期望 403，实际 $code"; exit 1; }
+
+          # 解锁后 -> 200
+          curl -s -o /dev/null -b /tmp/ck.txt -c /tmp/ck.txt -X POST $B/api/settings/unlock \
+            -H 'Content-Type: application/json' -d "{\"password\":\"$SETTINGS_ACCESS_PASSWORD\"}"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/ck.txt $B/api/settings)
+          [ "$code" = "200" ] || { echo "解锁后仍失败，实际 $code"; exit 1; }
+
+          echo "✅ 冒烟通过"
+
+      - name: 失败时输出应用日志
+        if: failure()
+        run: tail -200 /tmp/app.log || true
+
+  # ---------------------------------------------------------------- 门禁
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [backend, frontend, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总上游结果
+        # skipped 视为通过（模块不存在或条件不满足），只有 failure / cancelled 才算失败
+        run: |
+          echo "backend=${{ needs.backend.result }}"
+          echo "frontend=${{ needs.frontend.result }}"
+          echo "smoke=${{ needs.smoke.result }}"
+
+          fail=0
+          for r in "${{ needs.backend.result }}" "${{ needs.frontend.result }}" "${{ needs.smoke.result }}"; do
+            case "$r" in
+              failure|cancelled) fail=1 ;;
+            esac
+          done
+
+          if [ "$fail" = "1" ]; then
+            echo "❌ 存在失败或被取消的 job"
+            exit 1
+          fi
+          echo "✅ 通过（跳过的模块不计为失败）"

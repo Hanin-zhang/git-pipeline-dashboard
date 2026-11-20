@@ -15,7 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
  * delivery id claim, Redis push. Nothing heavy runs on this thread.
  */
 @RestController
-@RequestMapping("${app.webhook.path:/api/webhooks/github}")
+@RequestMapping({"${app.webhook.path:/api/webhooks/github}", "${app.webhook.path:/api/webhooks/github}/"})
 @RequiredArgsConstructor
 public class WebhookController {
 

@@ -1,0 +1,11 @@
+{
+    "schema_version": 2,
+    "commit": "589a9606cda20b9497805ebc7a7a2e6567a54665",
+    "indexed_at": "2026-11-20T03:10:43Z",
+    "project": "github-look",
+    "nodes": 1404,
+    "edges": 4336,
+    "original_size": 5505024,
+    "compressed_size": 863715,
+    "compression_level": 9
+}

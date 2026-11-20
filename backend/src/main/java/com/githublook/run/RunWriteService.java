@@ -16,7 +16,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Write side of the run aggregate. Upserts are idempotent on
@@ -48,6 +52,19 @@ public class RunWriteService {
         boolean created = existing == null;
         boolean wasFinished = !created && existing.isFinished();
         WorkflowRun run = created ? new WorkflowRun() : existing;
+
+        // 迟到的旧事件不能把已结束的运行拉回「运行中」。
+        // 并发消费 + GitHub 偶发乱序时，in_progress 事件可能晚于 completed 被处理；
+        // 由于 updateById 会忽略 null 字段，这种回退会留下
+        // status=in_progress + conclusion=success 的矛盾状态（看板显示一直在跑、趋势图统计不到）。
+        boolean incomingFinished = "completed".equalsIgnoreCase(data.status());
+        boolean alreadyConcluded = !created
+                && (existing.isFinished() || existing.getConclusion() != null || existing.getCompletedAt() != null);
+        if (alreadyConcluded && !incomingFinished) {
+            log.warn("run_status_regression_ignored repo={} run={} kept={} incoming={}",
+                    repoFullName, data.id(), existing.getStatus(), data.status());
+            return new UpsertOutcome(existing, false, false);
+        }
 
         run.setExternalRunId(data.id());
         run.setRepoFullName(repoFullName);
@@ -90,7 +107,22 @@ public class RunWriteService {
             run.setCreatedAt(now);
             runMapper.insert(run);
         } else {
-            runMapper.updateById(run);
+            // 上面的 alreadyConcluded 检查基于「先读后判」，两个并发事务可能都读到旧值而同时放行。
+            // 这里把判断下沉成 UPDATE 的 WHERE 条件，让数据库保证原子性：
+            // 任何「非完成态」的写入都不允许落到已经产出结论的行上。
+            LambdaUpdateWrapper<WorkflowRun> guard = new LambdaUpdateWrapper<WorkflowRun>()
+                    .eq(WorkflowRun::getId, run.getId());
+            if (!incomingFinished) {
+                guard.and(w -> w.ne(WorkflowRun::getStatus, "completed")
+                        .or().isNull(WorkflowRun::getConclusion));
+            }
+            int updated = runMapper.update(run, guard);
+            if (updated == 0) {
+                log.warn("run_update_rejected_stale repo={} run={} incomingStatus={}",
+                        repoFullName, data.id(), data.status());
+                WorkflowRun fresh = runMapper.selectById(existing.getId());
+                return new UpsertOutcome(fresh == null ? existing : fresh, false, false);
+            }
         }
 
         if (data.jobs() != null && !data.jobs().isEmpty()) {
@@ -103,17 +135,38 @@ public class RunWriteService {
         return new UpsertOutcome(run, created, justFinished);
     }
 
-    private void replaceJobs(WorkflowRun run, List<GithubJob> jobs) {
-        List<RunJob> previous = jobMapper.selectList(new LambdaQueryWrapper<RunJob>()
-                .eq(RunJob::getRunPk, run.getId()));
-        if (!previous.isEmpty()) {
-            List<Long> jobIds = previous.stream().map(RunJob::getId).toList();
-            stepMapper.delete(new LambdaQueryWrapper<RunStep>().in(RunStep::getJobPk, jobIds));
-            jobMapper.delete(new LambdaQueryWrapper<RunJob>().eq(RunJob::getRunPk, run.getId()));
+    /**
+     * 同步该 run 的 job / step 明细。
+     *
+     * <p>按 {@code external_job_id} 做增量 upsert，而不是「全删再全插」：
+     * <ul>
+     *   <li>id 稳定 —— 前端抽屉、SSE 刷新时不会因为主键漂移而指向不存在的行</li>
+     *   <li>一次运行会陆续收到 queued / in_progress / completed 多个事件，
+     *       每个事件都全删全插会让 run_job 的自增键暴涨，并制造大量无谓的 DELETE</li>
+     *   <li>两个消费者并发处理同一次运行的相邻事件时，「双删双插」会留下重复 job 行</li>
+     * </ul>
+     */
+    @Transactional
+    public void replaceJobs(WorkflowRun run, List<GithubJob> jobs) {
+        Map<Long, RunJob> existing = new HashMap<>();
+        for (RunJob job : jobMapper.selectList(new LambdaQueryWrapper<RunJob>()
+                .eq(RunJob::getRunPk, run.getId()))) {
+            if (job.getExternalJobId() != null) {
+                existing.put(job.getExternalJobId(), job);
+            }
         }
 
+        Set<Long> seen = new HashSet<>();
         for (GithubJob payload : jobs) {
-            RunJob job = new RunJob();
+            if (payload.id() == null || !seen.add(payload.id())) {
+                continue;
+            }
+
+            RunJob job = existing.remove(payload.id());
+            boolean isNew = job == null;
+            if (isNew) {
+                job = new RunJob();
+            }
             job.setRunPk(run.getId());
             job.setExternalJobId(payload.id());
             job.setName(payload.name());
@@ -129,21 +182,39 @@ public class RunWriteService {
             job.setRunnerName(payload.runnerName());
             job.setHtmlUrl(payload.htmlUrl());
             job.setNeeds(joinNeeds(payload.needs()));
-            jobMapper.insert(job);
 
-            if (payload.steps() != null) {
-                for (GithubStep stepPayload : payload.steps()) {
-                    RunStep step = new RunStep();
-                    step.setJobPk(job.getId());
-                    step.setStepNumber(stepPayload.number());
-                    step.setName(stepPayload.name());
-                    step.setStatus(stepPayload.status());
-                    step.setConclusion(stepPayload.conclusion());
-                    step.setStartedAt(time.toLocal(stepPayload.startedAt()));
-                    step.setCompletedAt(time.toLocal(stepPayload.completedAt()));
-                    stepMapper.insert(step);
-                }
+            if (isNew) {
+                jobMapper.insert(job);
+            } else {
+                jobMapper.updateById(job);
             }
+            replaceSteps(job, payload.steps());
+        }
+
+        // GitHub 侧已经没有的 job（重跑换了 job、或矩阵缩小）才删
+        for (RunJob stale : existing.values()) {
+            stepMapper.delete(new LambdaQueryWrapper<RunStep>().eq(RunStep::getJobPk, stale.getId()));
+            jobMapper.deleteById(stale.getId());
+            log.info("job_removed run={} job={} name={}", run.getId(), stale.getId(), stale.getName());
+        }
+    }
+
+    /** step 没有稳定的外部 id，按 job 整体替换即可（数量小、无外部引用）。 */
+    private void replaceSteps(RunJob job, List<GithubStep> steps) {
+        stepMapper.delete(new LambdaQueryWrapper<RunStep>().eq(RunStep::getJobPk, job.getId()));
+        if (steps == null) {
+            return;
+        }
+        for (GithubStep stepPayload : steps) {
+            RunStep step = new RunStep();
+            step.setJobPk(job.getId());
+            step.setStepNumber(stepPayload.number());
+            step.setName(stepPayload.name());
+            step.setStatus(stepPayload.status());
+            step.setConclusion(stepPayload.conclusion());
+            step.setStartedAt(time.toLocal(stepPayload.startedAt()));
+            step.setCompletedAt(time.toLocal(stepPayload.completedAt()));
+            stepMapper.insert(step);
         }
     }
 

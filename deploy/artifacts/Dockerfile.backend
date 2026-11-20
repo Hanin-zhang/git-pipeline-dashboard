@@ -1,0 +1,41 @@
+# 只打包产物：不编译、不装 Maven，镜像层就是 COPY 一个 jar
+# 构建上下文必须是包含 backend/*.jar 的目录
+
+FROM eclipse-temurin:21-jre-alpine
+
+# curl 给 HEALTHCHECK 用；tzdata 保证时区正确
+RUN apk add --no-cache curl tzdata \
+    && addgroup -S app && adduser -S app -G app
+
+WORKDIR /app
+
+# 目录里必须且只能有一个 jar。
+# 直接用 COPY backend/*.jar 的话，两个 jar 并存时 Docker 只会抛
+# "COPY with more than one source file"，看不出到底怎么回事。
+# 这里先拷到临时目录数一遍，把问题说清楚。
+COPY backend/ /tmp/backend/
+RUN set -e; \
+    count=$(ls -1 /tmp/backend/*.jar 2>/dev/null | wc -l); \
+    if [ "$count" != "1" ]; then \
+        echo "------------------------------------------------------------"; \
+        echo "ERROR: backend/ 下必须只有 1 个 jar，当前有 $count 个："; \
+        ls -1 /tmp/backend/ || true; \
+        echo "请先删掉旧版本的 jar 再构建"; \
+        echo "------------------------------------------------------------"; \
+        exit 1; \
+    fi; \
+    mv /tmp/backend/*.jar /app/app.jar; \
+    rm -rf /tmp/backend
+RUN chown -R app:app /app
+
+USER app
+
+ENV TZ=Asia/Shanghai \
+    JAVA_OPTS="-Xms192m -Xmx384m -XX:MaxMetaspaceSize=160m -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Duser.timezone=Asia/Shanghai"
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:8080/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar app.jar"]
