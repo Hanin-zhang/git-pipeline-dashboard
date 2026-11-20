@@ -1,0 +1,213 @@
+name: github-dashboard-CI
+
+# 触发：主分支推送、PR、手动运行
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支上的新提交会取消上一轮未完成的构建，省额度也省等待
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "21"
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------- 后端
+  backend:
+    name: Java · 构建与单元测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 21 并缓存 Maven 依赖
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: 编译 + 单元测试
+        # verify = compile + test + package（含 spring-boot repackage）
+        # -ntp 关掉下载进度条，日志更干净
+        run: mvn -B -ntp verify
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          # 注意：artifact 的 path 相对仓库根目录，不受 defaults.run 影响
+          path: backend/target/surefire-reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------- 前端
+  frontend:
+    name: Web · 类型检查与单元测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node 22 并缓存 npm
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ci 严格按 lockfile 安装，lock 与 package.json 不一致会直接失败
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm run test
+
+      - name: 生产构建
+        run: npm run build
+
+      - name: 上传构建产物
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
+
+  # ---------------------------------------------------------------- 冒烟
+  smoke:
+    name: 冒烟 · 真实启动与接口校验
+    needs: backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: 打包（测试已在 backend job 跑过）
+        working-directory: backend
+        run: mvn -B -ntp -DskipTests package
+
+      - name: 启动并等待健康检查通过
+        env:
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: "6379"
+          # 冒烟用固定值即可，都是容器内的临时环境
+          APP_JWT_SECRET: ci-smoke-secret-at-least-32-characters-long
+          ADMIN_USERNAME: admin
+          ADMIN_PASSWORD: admin12345
+          SETTINGS_ACCESS_PASSWORD: settings12345
+          GITHUB_WEBHOOK_SECRET: ci-smoke-secret
+          PUBLIC_BASE_URL: http://127.0.0.1:8080
+          DEMO_DATA_ENABLED: "false"
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          java -jar target/github-look-backend-*.jar > /tmp/app.log 2>&1 &
+          echo $! > /tmp/app.pid
+
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:8080/actuator/health >/dev/null 2>&1; then
+              echo "✅ 应用就绪（约 $((i * 2)) 秒）"
+              break
+            fi
+            if ! kill -0 "$(cat /tmp/app.pid)" 2>/dev/null; then
+              echo "❌ 进程已退出"; tail -100 /tmp/app.log; exit 1
+            fi
+            sleep 2
+          done
+
+          curl -fsS http://127.0.0.1:8080/actuator/health
+
+      - name: 校验关键接口
+        env:
+          ADMIN_PASSWORD: admin12345
+          SETTINGS_ACCESS_PASSWORD: settings12345
+        run: |
+          set -euo pipefail
+          B=http://127.0.0.1:8080
+
+          # 未登录访问受保护接口 -> 401
+          code=$(curl -s -o /dev/null -w '%{http_code}' $B/api/auth/me)
+          [ "$code" = "401" ] || { echo "期望 401，实际 $code"; exit 1; }
+
+          # 登录 -> 200
+          code=$(curl -s -o /dev/null -w '%{http_code}' -c /tmp/ck.txt \
+            -X POST $B/api/auth/login -H 'Content-Type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PASSWORD\"}")
+          [ "$code" = "200" ] || { echo "登录失败，实际 $code"; exit 1; }
+
+          # 列表接口 -> 200
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/ck.txt "$B/api/runs?page=1&size=5")
+          [ "$code" = "200" ] || { echo "运行列表异常，实际 $code"; exit 1; }
+
+          # 设置页未解锁 -> 403（门禁生效）
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/ck.txt $B/api/settings)
+          [ "$code" = "403" ] || { echo "门禁失效，期望 403，实际 $code"; exit 1; }
+
+          # 解锁后 -> 200
+          curl -s -o /dev/null -b /tmp/ck.txt -c /tmp/ck.txt -X POST $B/api/settings/unlock \
+            -H 'Content-Type: application/json' -d "{\"password\":\"$SETTINGS_ACCESS_PASSWORD\"}"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/ck.txt $B/api/settings)
+          [ "$code" = "200" ] || { echo "解锁后仍失败，实际 $code"; exit 1; }
+
+          echo "✅ 冒烟通过"
+
+      - name: 失败时输出应用日志
+        if: failure()
+        run: tail -200 /tmp/app.log || true
+
+  # ---------------------------------------------------------------- 门禁
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [backend, frontend, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总上游结果
+        run: |
+          echo "backend=${{ needs.backend.result }}"
+          echo "frontend=${{ needs.frontend.result }}"
+          echo "smoke=${{ needs.smoke.result }}"
+
+          for r in "${{ needs.backend.result }}" "${{ needs.frontend.result }}" "${{ needs.smoke.result }}"; do
+            if [ "$r" != "success" ]; then
+              echo "❌ 存在未通过的 job，CI 失败"
+              exit 1
+            fi
+          done
+          echo "✅ 全部通过"
