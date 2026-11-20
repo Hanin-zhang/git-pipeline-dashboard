@@ -1,0 +1,140 @@
+# GitHub Look —— 产物直装版（服务器上只需要 Docker，不需要源码/Maven/Node）
+#
+# 目录结构要求：
+#   .
+#   ├── backend/github-look-backend-1.1.0.jar
+#   ├── frontend-dist/            (index.html + assets/)
+#   ├── Dockerfile.backend
+#   ├── Dockerfile.web
+#   ├── nginx.conf
+#   ├── docker-compose.yml
+#   └── .env
+#
+# 启动： docker compose up -d --build
+# 日志： docker compose logs -f backend
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ghl-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请先在 .env 里设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-github_look}
+      MYSQL_USER: ${MYSQL_USER:-githublook}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请先在 .env 里设置 MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    # 小内存机器友好参数；4G+ 可把 buffer-pool 调到 512M
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      - --innodb-buffer-pool-size=128M
+      - --performance-schema=OFF
+      - --max-connections=60
+      - --skip-name-resolve
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    mem_limit: 600m
+    networks: [ghl]
+
+  redis:
+    image: redis:7-alpine
+    container_name: ghl-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    mem_limit: 160m
+    networks: [ghl]
+
+  backend:
+    image: ${BACKEND_IMAGE:-github-look-backend:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: ghl-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_URL: "jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-github_look}?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8&allowPublicKeyRetrieval=true"
+      DB_USERNAME: ${MYSQL_USER:-githublook}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_DRIVER: com.mysql.cj.jdbc.Driver
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-16}
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?请设置 GITHUB_WEBHOOK_SECRET}
+      WEBHOOK_AUTO_REGISTER: ${WEBHOOK_AUTO_REGISTER:-false}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?请设置 PUBLIC_BASE_URL}
+
+      APP_JWT_SECRET: ${APP_JWT_SECRET:?请用 openssl rand -hex 32 生成}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请设置 ADMIN_PASSWORD}
+      SETTINGS_ACCESS_PASSWORD: ${SETTINGS_ACCESS_PASSWORD:?请设置 SETTINGS_ACCESS_PASSWORD}
+      SETTINGS_TOKEN_TTL: ${SETTINGS_TOKEN_TTL:-PT30M}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?请设置 ALLOWED_ORIGINS}
+
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+
+      QUEUE_CONSUMERS: ${QUEUE_CONSUMERS:-16}
+      DEMO_DATA_ENABLED: ${DEMO_DATA_ENABLED:-false}
+      APP_ZONE: ${APP_ZONE:-Asia/Shanghai}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TZ: Asia/Shanghai
+      JAVA_OPTS: ${JAVA_OPTS:--Xms192m -Xmx384m -XX:MaxMetaspaceSize=160m -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -Duser.timezone=Asia/Shanghai}
+    expose:
+      - "8080"
+    mem_limit: 640m
+    networks: [ghl]
+
+  web:
+    image: ${WEB_IMAGE:-github-look-web:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: ghl-web
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${WEB_PORT:-8188}:80"
+    mem_limit: 96m
+    networks: [ghl]
+
+volumes:
+  mysql-data:
+  redis-data:
+
+networks:
+  ghl:
+    driver: bridge

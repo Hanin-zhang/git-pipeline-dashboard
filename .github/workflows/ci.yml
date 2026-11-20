@@ -1,4 +1,4 @@
-name: github-dashboard-CI
+name: CI
 
 # 触发：主分支推送、PR、手动运行
 on:

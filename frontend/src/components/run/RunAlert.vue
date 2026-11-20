@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import type { RunDetail, RunJob, RunStep } from '@/api/types'
 import { formatDateTime, formatDuration } from '@/utils/format'
 
@@ -42,6 +42,20 @@ const tone = computed(() => {
 const passedJobs = computed(
   () => (props.run?.jobs ?? []).filter((job) => job.conclusion === 'success').length,
 )
+
+/* 运行中时显示实时累加的总耗时，不用刷新页面也能看到时间在走 */
+const now = ref(Date.now())
+const ticker = window.setInterval(() => {
+  if (tone.value === 'running') now.value = Date.now()
+}, 1000)
+onUnmounted(() => window.clearInterval(ticker))
+
+const liveElapsed = computed(() => {
+  if (tone.value !== 'running' || !props.run?.startedAt) return null
+  const started = new Date(props.run.startedAt).getTime()
+  if (Number.isNaN(started)) return null
+  return Math.max(0, now.value - started)
+})
 </script>
 
 <template>
@@ -88,7 +102,7 @@ const passedJobs = computed(
     <!-- 运行中 -->
     <template v-else-if="tone === 'running'">
       <div class="alert-row">
-        <el-icon class="alert-icon"><Loading /></el-icon>
+        <el-icon class="alert-icon spinning"><Loading /></el-icon>
         <div class="alert-body">
           <div class="alert-title">
             {{ run?.status === 'queued' ? '排队中，等待 runner 分配' : '正在执行' }}
@@ -96,6 +110,7 @@ const passedJobs = computed(
           </div>
           <div class="alert-detail">
             <span>{{ passedJobs }} / {{ totalJobs }} 个 job 已完成</span>
+            <span v-if="liveElapsed !== null" class="live">已运行 {{ formatDuration(liveElapsed) }}</span>
             <span v-if="run?.startedAt">开始于 {{ formatDateTime(run.startedAt) }}</span>
           </div>
         </div>
@@ -171,6 +186,22 @@ const passedJobs = computed(
   font-size: 17px;
   margin-top: 1px;
   flex: none;
+}
+
+.alert-icon.spinning {
+  animation: alert-spin 1s linear infinite;
+}
+
+@keyframes alert-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.alert-detail .live {
+  color: #1677ff;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
 }
 
 .failure .alert-icon {

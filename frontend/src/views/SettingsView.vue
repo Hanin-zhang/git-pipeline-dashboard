@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
 import { reposApi, settingsApi } from '@/api'
 import { ApiError } from '@/api/client'
+import { copyText } from '@/utils/format'
 import type { GateState, Repo, Settings } from '@/api/types'
 
 const settings = ref<Settings | null>(null)
@@ -25,7 +26,7 @@ const remainingMinutes = computed(() => {
 const form = reactive<Record<string, { webhookUrl: string; enabled: boolean; notifyOn: string }>>({})
 
 const repoDialog = ref(false)
-const newRepo = reactive({ fullName: '', defaultBranch: 'main' })
+const newRepo = reactive({ fullName: '', defaultBranch: 'main', secret: '', autoSecret: false })
 const creating = ref(false)
 
 const secretVisible = ref<Record<number, boolean>>({})
@@ -102,11 +103,19 @@ async function load() {
 
 async function copy(text?: string | null) {
   if (!text) return
-  try {
-    await navigator.clipboard.writeText(text)
-    ElMessage.success('已复制到剪贴板')
-  } catch {
-    ElMessage.warning('浏览器拒绝了剪贴板访问，请手动选中复制')
+  const ok = await copyText(text)
+  ElMessage[ok ? 'success' : 'warning'](ok ? '已复制到剪贴板' : '复制失败，请手动选中文本复制')
+}
+
+/** 各渠道的机器人地址格式不同，占位文案要跟着渠道走，否则用户会照着钉钉地址去填飞书。 */
+function webhookPlaceholder(channel: string): string {
+  switch (channel) {
+    case 'FEISHU':
+      return 'https://open.feishu.cn/open-apis/bot/v2/hook/...'
+    case 'WEBHOOK':
+      return 'https://your-domain.com/hooks/github-look'
+    default:
+      return 'https://oapi.dingtalk.com/robot/send?access_token=...'
   }
 }
 
@@ -133,16 +142,45 @@ async function toggleRepo(repo: Repo, enabled: boolean) {
 }
 
 async function createRepo() {
-  if (!/^[\w.-]+\/[\w.-]+$/.test(newRepo.fullName)) {
-    ElMessage.warning('仓库全名格式应为 owner/repo')
+  const raw = newRepo.fullName.trim()
+  if (!raw) {
+    ElMessage.warning('请填写仓库地址')
     return
   }
+  // 允许 owner/repo 或完整 GitHub 链接；真正的归一化与校验由后端负责
+  if (!/^[\w.-]+\/[\w.-]+$/.test(raw) && !/^(https?:\/\/|git@)/i.test(raw)) {
+    ElMessage.warning('请填写 owner/repo 或 https://github.com/owner/repo')
+    return
+  }
+  // Secret 默认必填：留空 => 前端拦截。
+  // 只有显式勾选「自动生成」才允许留空，避免悄悄生成一个与 GitHub 不一致的值。
+  if (!newRepo.autoSecret && !newRepo.secret.trim()) {
+    ElMessage.warning('请填写 Webhook Secret，或勾选下方的「自动生成随机 Secret」')
+    return
+  }
+  if (!newRepo.autoSecret && newRepo.secret.trim().length < 6) {
+    ElMessage.warning('Secret 长度至少 6 位，且必须与 GitHub 上填写的完全一致')
+    return
+  }
+
   creating.value = true
   try {
-    const created = await reposApi.create({ fullName: newRepo.fullName, defaultBranch: newRepo.defaultBranch })
+    const created = await reposApi.create({
+      fullName: raw,
+      defaultBranch: newRepo.defaultBranch,
+      // 只有勾选自动生成时才不带 secret，交给后端生成 ghl_xxx
+      ...(newRepo.autoSecret ? {} : { secret: newRepo.secret.trim() }),
+    })
     repoDialog.value = false
+    const generated = newRepo.autoSecret
     newRepo.fullName = ''
-    ElMessage.success(`已接入 ${created.fullName}，Secret 已生成`)
+    newRepo.secret = ''
+    newRepo.autoSecret = false
+    ElMessage.success(
+      generated
+        ? `已接入 ${created.fullName}，Secret 已生成，请复制后填到 GitHub`
+        : `已接入 ${created.fullName}，请确认 GitHub 上填写的 Secret 与刚才输入的一致`,
+    )
     await load()
   } finally {
     creating.value = false
@@ -390,7 +428,7 @@ onUnmounted(() => {
             <div class="row" style="flex-wrap: wrap">
               <el-input
                 v-model="form[item.channel].webhookUrl"
-                :placeholder="item.enabled ? '不修改请留空' : 'https://oapi.dingtalk.com/robot/send?access_token=...'"
+                :placeholder="item.enabled ? '不修改请留空' : webhookPlaceholder(item.channel)"
                 style="flex: 1; min-width: 320px"
                 show-password
               />
@@ -460,11 +498,33 @@ onUnmounted(() => {
 
     <el-dialog v-model="repoDialog" title="接入新仓库" width="440px">
       <el-form label-position="top">
-        <el-form-item label="仓库全名">
-          <el-input v-model="newRepo.fullName" placeholder="owner/repo" />
+        <el-form-item label="仓库地址">
+          <el-input
+            v-model="newRepo.fullName"
+            placeholder="Hanin-zhang/git-pipeline-dashboard"
+          />
+          <div class="form-hint">
+            支持 <span class="mono">owner/repo</span> 或完整链接
+            <span class="mono">https://github.com/owner/repo</span>，后端会自动解析成 owner/repo
+          </div>
         </el-form-item>
         <el-form-item label="默认分支">
           <el-input v-model="newRepo.defaultBranch" placeholder="main" />
+        </el-form-item>
+        <el-form-item label="Webhook Secret" required>
+          <el-input
+            v-model="newRepo.secret"
+            :disabled="newRepo.autoSecret"
+            placeholder="与 GitHub Webhook 里填的完全一致，例如 hanin-github"
+            show-password
+          />
+          <el-checkbox v-model="newRepo.autoSecret" style="margin-top: 6px">
+            自动生成随机 Secret（勾选后无需填写）
+          </el-checkbox>
+          <div class="form-hint">
+            Secret 必须与 GitHub 仓库 Webhook 里填的完全一致，否则投递会 401 验签失败。
+            不确定填什么就用 <span class="mono">hanin-github</span>，两边保持一致即可。
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -540,5 +600,12 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 550;
   white-space: nowrap;
+}
+
+.form-hint {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #86909c;
 }
 </style>

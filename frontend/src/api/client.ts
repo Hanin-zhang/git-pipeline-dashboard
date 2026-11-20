@@ -145,6 +145,25 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const api = {
   get: <T>(path: string) => request<T>(path, { method: 'GET' }),
+  /** 取纯文本响应（执行日志这类不是 JSON 的接口） */
+  getText: async (path: string): Promise<string> => {
+    const response = await fetch(`${BASE}${path}`, {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'text/plain' },
+    })
+    if (!response.ok) {
+      let message = `请求失败 (${response.status})`
+      try {
+        const body = (await response.json()) as { message?: string }
+        if (body?.message) message = body.message
+      } catch {
+        /* 非 JSON 错误体，保留默认文案 */
+      }
+      throw new ApiError(response.status, 'HTTP_' + response.status, message)
+    }
+    return response.text()
+  },
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) }),
   put: <T>(path: string, body?: unknown) =>

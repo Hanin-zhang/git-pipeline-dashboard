@@ -1,0 +1,155 @@
+name: CD
+
+# 只在「打标签」或「手动触发」时部署，避免每次 push 直接动生产
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: '要部署的镜像标签（默认 latest）'
+        required: true
+        default: 'latest'
+
+# 部署不能并发，也不能被新任务取消（否则可能停在「镜像已拉、容器未起」）
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ------------------------------------------------ 构建并推送镜像
+  build:
+    name: 构建镜像
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      # 镜像仓库名必须全小写，而 GitHub 仓库名允许大写（Hanin-zhang/xxx）
+      ns: ${{ steps.meta.outputs.ns }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 计算镜像标签
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.image_tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ns=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "本次部署：${GITHUB_REPOSITORY,,}-backend:$TAG"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN 自带 packages:write，不需要额外配 PAT
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建后端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.backend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.ns }}-backend:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.ns }}-backend:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: 构建前端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.frontend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.ns }}-web:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.ns }}-web:latest
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  # ------------------------------------------------ 部署到服务器
+  deploy:
+    name: 部署到生产
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: 拉取新镜像并切换（失败自动回滚）
+        uses: appleboy/ssh-action@v1
+        env:
+          NEW_TAG: ${{ needs.build.outputs.tag }}
+          BACKEND_IMAGE: ${{ env.REGISTRY }}/${{ needs.build.outputs.ns }}-backend
+          WEB_IMAGE: ${{ env.REGISTRY }}/${{ needs.build.outputs.ns }}-web
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          command_timeout: 10m
+          envs: NEW_TAG,BACKEND_IMAGE,WEB_IMAGE
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_PATH }}"
+
+            # 记住当前版本，回滚时要用
+            PREV_TAG=$(grep -E '^IMAGE_TAG=' .env | cut -d= -f2 || echo "latest")
+            echo "当前版本：$PREV_TAG  →  目标版本：$NEW_TAG"
+
+            deploy() {
+              local tag="$1"
+              # 把镜像地址与标签写进 .env，compose 直接读
+              sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${tag}|; s|^BACKEND_IMAGE=.*|BACKEND_IMAGE=${BACKEND_IMAGE}|; s|^WEB_IMAGE=.*|WEB_IMAGE=${WEB_IMAGE}|" .env
+              grep -q '^IMAGE_TAG=' .env    || echo "IMAGE_TAG=${tag}" >> .env
+              grep -q '^BACKEND_IMAGE=' .env || echo "BACKEND_IMAGE=${BACKEND_IMAGE}" >> .env
+              grep -q '^WEB_IMAGE=' .env     || echo "WEB_IMAGE=${WEB_IMAGE}" >> .env
+
+              docker compose pull backend web
+              docker compose up -d --no-build backend web
+
+              # 健康探针：/api/auth/me 返回 401 说明网关与后端都活着
+              for i in $(seq 1 40); do
+                code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${WEB_PORT:-8081}/api/auth/me" || true)
+                if [ "$code" = "401" ]; then
+                  echo "✅ 健康检查通过（第 $((i*2)) 秒）"
+                  return 0
+                fi
+                sleep 2
+              done
+              echo "❌ 80 秒内未就绪"
+              return 1
+            }
+
+            if deploy "$NEW_TAG"; then
+              echo "部署成功：$NEW_TAG"
+            else
+              echo "回滚到 $PREV_TAG"
+              docker compose logs --tail 60 backend || true
+              deploy "$PREV_TAG" || { echo "回滚同样失败，需要人工介入"; exit 1; }
+              exit 1
+            fi
+
+      - name: 部署后冒烟
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            cd "${{ secrets.DEPLOY_PATH }}"
+            docker compose ps
+            docker compose logs --tail 20 backend | grep -E "Starting GithubLook|Successfully applied|Migrating" || true

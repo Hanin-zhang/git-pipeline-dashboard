@@ -127,12 +127,42 @@ export function stepDuration(step: { startedAt?: string; completedAt?: string })
   return Math.max(0, end - start)
 }
 
-/** 剪贴板在非安全上下文会 reject，这里统一兜底并返回是否成功。 */
+/**
+ * 复制到剪贴板。
+ *
+ * 注意：`navigator.clipboard` 只在安全上下文（HTTPS 或 localhost）可用。
+ * 用 HTTP + IP 访问时它根本不存在，所以必须回退到 `execCommand('copy')`，
+ * 否则点击复制只会弹「浏览器拒绝」。
+ */
 export async function copyText(text?: string | null): Promise<boolean> {
   if (!text) return false
+
+  if (window.isSecureContext && navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      // 继续走兜底方案
+    }
+  }
+  return legacyCopy(text)
+}
+
+function legacyCopy(text: string): boolean {
   try {
-    await navigator.clipboard.writeText(text)
-    return true
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    // 放在视口外，避免页面跳动
+    area.style.position = 'fixed'
+    area.style.top = '-1000px'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    area.setSelectionRange(0, text.length)
+    const ok = document.execCommand('copy')
+    document.body.removeChild(area)
+    return ok
   } catch {
     return false
   }

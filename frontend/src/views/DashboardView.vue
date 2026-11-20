@@ -64,7 +64,7 @@ function toFeedFromRun(run: RunSummary): FeedItem {
 const trendOption = computed<EChartsOption>(() => {
   const labels = trend.value.map((p) => p.label)
   return {
-    grid: { left: 8, right: 16, top: 34, bottom: 8, containLabel: true },
+    grid: { left: 8, right: 18, top: 44, bottom: 8, containLabel: true },
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'shadow' },
@@ -86,7 +86,16 @@ const trendOption = computed<EChartsOption>(() => {
         )
       },
     },
-    legend: { top: 0, right: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: chartTheme.muted, fontSize: 12 } },
+    // 图例居中放顶部：原来贴右边缘，会和右轴刻度（100% 那行）叠在一起
+    legend: {
+      top: 0,
+      left: 'center',
+      icon: 'roundRect',
+      itemWidth: 10,
+      itemHeight: 10,
+      itemGap: 18,
+      textStyle: { color: chartTheme.muted, fontSize: 12 },
+    },
     xAxis: {
       type: 'category',
       data: labels,
@@ -97,17 +106,15 @@ const trendOption = computed<EChartsOption>(() => {
     yAxis: [
       {
         type: 'value',
-        name: '运行数',
-        nameTextStyle: { color: chartTheme.muted, fontSize: 11 },
+        // 不再画轴名：图例已经标明系列含义，轴名挤在左上角会和图例/刻度打架
         splitLine: { lineStyle: { color: chartTheme.grid, type: 'dashed' } },
         axisLabel: { color: chartTheme.muted, fontSize: 11.5 },
+        minInterval: 1,
       },
       {
         type: 'value',
-        name: '成功率',
         min: 0,
         max: 100,
-        nameTextStyle: { color: chartTheme.muted, fontSize: 11 },
         splitLine: { show: false },
         axisLabel: { color: chartTheme.muted, fontSize: 11.5, formatter: '{value}%' },
       },
@@ -136,6 +143,8 @@ const trendOption = computed<EChartsOption>(() => {
         smooth: true,
         symbol: 'circle',
         symbolSize: 6,
+        // 没有运行的那天不画点，否则折线会被 0% 拉到底部造成「成功率暴跌」的错觉
+        connectNulls: false,
         lineStyle: { width: 2.2, color: chartTheme.primary },
         itemStyle: { color: chartTheme.primary },
         areaStyle: {
@@ -151,7 +160,7 @@ const trendOption = computed<EChartsOption>(() => {
             ],
           },
         },
-        data: trend.value.map((p) => p.successRate),
+        data: trend.value.map((p) => (p.total > 0 ? p.successRate : null)),
       },
     ],
   }
@@ -271,7 +280,10 @@ function scheduleRefresh() {
   if (refreshTimer !== null) return
   refreshTimer = window.setTimeout(async () => {
     refreshTimer = null
-    const [summaryRes, trendRes] = await Promise.all([
+    // 事件到达后要把「所有依赖同一次聚合的区块」一起刷新：
+    // 只刷指标卡和趋势图会让「工作流健康度 / 耗时对比」停在旧数据，
+    // 同一屏里出现「失败 1 次」但「失败率 0.0%」这种自相矛盾。
+    const [summaryRes, trendRes, workflowRes] = await Promise.all([
       dashboardApi.summary({ repo: repo.value || undefined, branch: branch.value || undefined }),
       dashboardApi.trend({
         days: days.value,
@@ -279,9 +291,15 @@ function scheduleRefresh() {
         branch: branch.value || undefined,
         granularity: granularity.value,
       }),
+      dashboardApi.workflows({
+        days: days.value,
+        repo: repo.value || undefined,
+        branch: branch.value || undefined,
+      }),
     ])
     summary.value = summaryRes
     trend.value = trendRes
+    workflows.value = workflowRes
   }, 1200)
 }
 
@@ -513,11 +531,11 @@ function openRun(runId?: number) {
           <el-table-column label="失败率" width="150">
             <template #default="{ row }">
               <div class="row" style="gap: 8px">
-                <div class="bar-track" style="flex: 1">
+                <div class="bar-track" style="width: 72px; flex: none">
                   <div
                     class="bar-fill"
                     :class="row.failureRate > 20 ? 'bad' : row.failureRate > 10 ? 'warn' : ''"
-                    :style="{ width: `${Math.min(row.failureRate, 100)}%` }"
+                    :style="{ width: `${Math.min(Math.max(row.failureRate, 0), 100)}%` }"
                   />
                 </div>
                 <span style="font-variant-numeric: tabular-nums; font-size: 12px; width: 44px; text-align: right">

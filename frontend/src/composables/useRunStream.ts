@@ -28,9 +28,27 @@ function push(event: string, data: RunEvent) {
   lastEventAt.value = enriched.receivedAt
 }
 
+/**
+ * 每个标签页一个稳定标识：存在 sessionStorage 里，刷新不变、关掉标签页自动消失。
+ * 服务端用它做连接键，同一标签页重连时顶掉旧连接，连接数不会越刷越多。
+ */
+function tabId(): string {
+  const KEY = 'gl_tab_id'
+  try {
+    const existing = sessionStorage.getItem(KEY)
+    if (existing) return existing
+    const created = Math.random().toString(36).slice(2, 10)
+    sessionStorage.setItem(KEY, created)
+    return created
+  } catch {
+    // 隐私模式下 sessionStorage 可能不可用，退回一次性 id
+    return Math.random().toString(36).slice(2, 10)
+  }
+}
+
 function open() {
   if (source) return
-  source = new EventSource(`${API_BASE}/stream`)
+  source = new EventSource(`${API_BASE}/stream?cid=${tabId()}`)
 
   source.addEventListener('ready', () => {
     connected.value = true

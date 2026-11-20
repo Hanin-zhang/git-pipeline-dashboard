@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { capabilitiesApi, runsApi } from '@/api'
 import type { Capabilities, RunDetail, RunJob, RunStep, RunSummary } from '@/api/types'
 import PipelineDag from '@/components/PipelineDag.vue'
@@ -33,6 +34,26 @@ const jobs = computed(() => run.value?.jobs ?? [])
 const failedJob = computed(() => jobs.value.find((job) => job.conclusion === 'failure'))
 const failedStep = computed(() => failedJob.value?.steps.find((step) => step.conclusion === 'failure'))
 const totalSteps = computed(() => jobs.value.reduce((sum, job) => sum + job.steps.length, 0))
+
+/** 没有 job 明细且配了 token 时，允许手动从 GitHub 拉一次 */
+const canSyncJobs = computed(
+  () => (capabilities.value?.githubActions ?? false) && jobs.value.length === 0,
+)
+const syncing = ref(false)
+
+async function syncJobs() {
+  if (!run.value) return
+  syncing.value = true
+  try {
+    const result = await runsApi.syncJobs(run.value.id)
+    ElMessage[result.jobs > 0 ? 'success' : 'warning'](result.message)
+    if (result.jobs > 0) await load()
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  } finally {
+    syncing.value = false
+  }
+}
 
 async function load() {
   loading.value = true
@@ -157,9 +178,21 @@ watch(() => route.params.id, load)
             点击节点定位到下方对应 job · Ctrl/⌘ + 滚轮缩放 · 空白处拖拽平移
           </div>
         </div>
-        <span class="text-muted" style="font-size: 12px">
-          {{ jobs.length }} 个节点 · {{ totalSteps }} 个步骤
-        </span>
+        <div class="head-right">
+          <el-button
+            v-if="canSyncJobs"
+            size="small"
+            type="primary"
+            plain
+            :loading="syncing"
+            @click="syncJobs"
+          >
+            <el-icon style="margin-right: 4px"><Refresh /></el-icon>从 GitHub 同步 Job 明细
+          </el-button>
+          <span class="text-muted" style="font-size: 12px">
+            {{ jobs.length }} 个节点 · {{ totalSteps }} 个步骤
+          </span>
+        </div>
       </div>
       <div class="card-pad" style="padding: 10px 18px 6px">
         <PipelineDag :jobs="jobs" :selected-id="selectedJobId" @select="selectJob" />
@@ -195,7 +228,7 @@ watch(() => route.params.id, load)
       </div>
     </div>
 
-    <StepDrawer v-model="drawerOpen" :job="drawerJob" :step="drawerStep" />
+    <StepDrawer v-model="drawerOpen" :run-id="run?.id" :job="drawerJob" :step="drawerStep" />
   </div>
 </template>
 
@@ -219,6 +252,12 @@ watch(() => route.params.id, load)
   grid-template-columns: minmax(0, 1.62fr) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+}
+
+.head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 @media (max-width: 1080px) {

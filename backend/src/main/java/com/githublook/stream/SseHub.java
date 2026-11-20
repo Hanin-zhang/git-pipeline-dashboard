@@ -24,29 +24,63 @@ import java.util.concurrent.atomic.AtomicLong;
 @RequiredArgsConstructor
 public class SseHub {
 
-    private static final long NO_TIMEOUT = 0L;
+    /** 30 分钟兜底：即使客户端是「半死不活」的连接，也会被容器回收再自动重连。 */
+    private static final long TIMEOUT_MS = 30 * 60 * 1000L;
 
     private final Map<String, SseEmitter> emitters = new ConcurrentHashMap<>();
     private final AtomicLong sequence = new AtomicLong();
 
-    public SseEmitter subscribe() {
-        String clientId = "c" + sequence.incrementAndGet();
-        SseEmitter emitter = new SseEmitter(NO_TIMEOUT);
+    /**
+     * @param requestedId 浏览器传上来的稳定标识（同一标签页刷新后不变）。
+     *                    相同 id 会顶掉旧连接，避免刷新一次就多一条僵尸连接。
+     */
+    public SseEmitter subscribe(String requestedId) {
+        String clientId = normalizeClientId(requestedId);
 
-        emitter.onCompletion(() -> remove(clientId, "completed"));
-        emitter.onTimeout(() -> remove(clientId, "timeout"));
-        emitter.onError(e -> remove(clientId, "error:" + e.getClass().getSimpleName()));
+        SseEmitter emitter = new SseEmitter(TIMEOUT_MS);
 
-        emitters.put(clientId, emitter);
+        // 只删「自己」：用 remove(key, value) 做身份校验。
+        // 关键点：旧连接的 onCompletion 是异步触发的，如果只按 clientId 删，
+        // 它会把刚刚顶替上来的新连接误删掉（表现为连接数莫名归零）。
+        emitter.onCompletion(() -> removeIfSame(clientId, emitter, "completed"));
+        emitter.onTimeout(() -> {
+            removeIfSame(clientId, emitter, "timeout");
+            try {
+                emitter.complete();
+            } catch (RuntimeException ignored) {
+                // 已经结束
+            }
+        });
+        emitter.onError(e -> removeIfSame(clientId, emitter, "error:" + e.getClass().getSimpleName()));
+
+        // 原子替换：put 返回旧值，随后再关闭旧连接，顺序不能颠倒
+        SseEmitter previous = emitters.put(clientId, emitter);
+        if (previous != null) {
+            try {
+                previous.complete();
+            } catch (RuntimeException ignored) {
+                // 旧连接可能已经断了
+            }
+            log.info("sse_replaced clientId={} connections={}", clientId, emitters.size());
+        }
+
         try {
             emitter.send(SseEmitter.event().name("ready").data(Map.of(
                     "clientId", clientId,
                     "connections", emitters.size())));
         } catch (IOException e) {
-            remove(clientId, "ready-send-failed");
+            removeIfSame(clientId, emitter, "ready-send-failed");
         }
         log.info("sse_subscribed clientId={} connections={}", clientId, emitters.size());
         return emitter;
+    }
+
+    /** 只接受安全字符；不合法或缺失时退回自增 id。 */
+    private String normalizeClientId(String requested) {
+        if (requested != null && requested.matches("[A-Za-z0-9_-]{4,40}")) {
+            return requested;
+        }
+        return "c" + sequence.incrementAndGet();
     }
 
     /** Broadcasts to every subscriber; dead emitters are dropped as they are discovered. */
@@ -58,7 +92,7 @@ public class SseHub {
             try {
                 emitter.send(SseEmitter.event().name(eventName).data(payload));
             } catch (IOException | IllegalStateException e) {
-                remove(clientId, "send-failed");
+                removeIfSame(clientId, emitter, "send-failed");
             }
         });
     }
@@ -69,7 +103,7 @@ public class SseHub {
             try {
                 emitter.send(SseEmitter.event().comment("keep-alive"));
             } catch (IOException | IllegalStateException e) {
-                remove(clientId, "heartbeat-failed");
+                removeIfSame(clientId, emitter, "heartbeat-failed");
             }
         });
     }
@@ -78,8 +112,9 @@ public class SseHub {
         return emitters.size();
     }
 
-    private void remove(String clientId, String reason) {
-        if (emitters.remove(clientId) != null) {
+    /** 只有当前 key 仍然映射到这个 emitter 时才移除，避免误删同 id 的新连接。 */
+    private void removeIfSame(String clientId, SseEmitter emitter, String reason) {
+        if (emitters.remove(clientId, emitter)) {
             log.info("sse_removed clientId={} reason={} connections={}", clientId, reason, emitters.size());
         }
     }

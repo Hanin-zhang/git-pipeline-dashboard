@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { RunJob } from '@/api/types'
 import { formatDurationShort, toneLabel, toneOf, type Tone } from '@/utils/format'
 
@@ -292,6 +292,33 @@ function tone(job: RunJob): Tone {
   return toneOf(job.status, job.conclusion)
 }
 
+/* ---------------- 运行中的实时耗时 ---------------- */
+
+const now = ref(Date.now())
+let ticker: number | null = null
+
+const hasRunning = computed(() => props.jobs.some((job) => tone(job) === 'running'))
+
+onMounted(() => {
+  ticker = window.setInterval(() => {
+    // 没有运行中的节点就不触发重渲染
+    if (hasRunning.value) now.value = Date.now()
+  }, 1000)
+})
+
+onUnmounted(() => {
+  if (ticker !== null) window.clearInterval(ticker)
+})
+
+/** 运行中的 job 用「现在 - 开始时间」实时累加，已结束的用落库的耗时 */
+function durationOf(job: RunJob): number | undefined {
+  if (tone(job) === 'running' && job.startedAt) {
+    const started = new Date(job.startedAt).getTime()
+    if (!Number.isNaN(started)) return Math.max(0, now.value - started)
+  }
+  return job.durationMs
+}
+
 function tooltipOf(job: RunJob): string {
   const parts = [
     `状态：${toneLabel(tone(job))}`,
@@ -323,7 +350,11 @@ function tooltipOf(job: RunJob): string {
       @pointerup="onPointerUp"
       @pointerleave="onPointerUp"
     >
-      <div v-if="!nodes.length" class="empty">这次运行没有 job 明细，无法绘制流水线图</div>
+      <div v-if="!nodes.length" class="empty">
+        这次运行还没有 job 明细，无法绘制流水线图。
+        <br />
+        GitHub 的 workflow_run 事件不携带 jobs，需要在服务器配置 GITHUB_TOKEN 后同步一次。
+      </div>
       <div
         v-else
         class="dag-holder"
@@ -375,19 +406,34 @@ function tooltipOf(job: RunJob): string {
             >
               <span class="dag-bar" />
               <div class="dag-head">
-                <span class="dag-dot">
-                  <template v-if="tone(node.job) === 'success'">✓</template>
+                <span class="dag-dot" :class="{ spinning: tone(node.job) === 'running' }">
+                  <svg v-if="tone(node.job) === 'running'" viewBox="0 0 20 20" class="spinner">
+                    <circle cx="10" cy="10" r="7.4" fill="none" stroke="rgba(255,255,255,0.35)" stroke-width="2.4" />
+                    <path
+                      d="M10 2.6 A7.4 7.4 0 0 1 17.4 10"
+                      fill="none"
+                      stroke="#ffffff"
+                      stroke-width="2.4"
+                      stroke-linecap="round"
+                    />
+                  </svg>
+                  <template v-else-if="tone(node.job) === 'success'">✓</template>
                   <template v-else-if="tone(node.job) === 'failure'">✕</template>
                   <template v-else-if="tone(node.job) === 'cancelled'">–</template>
                   <template v-else-if="tone(node.job) === 'skipped'">»</template>
                   <template v-else-if="tone(node.job) === 'queued'">·</template>
-                  <template v-else>▶</template>
+                  <template v-else>·</template>
                 </span>
                 <span class="dag-name">{{ node.job.name }}</span>
               </div>
-              <div class="dag-status">{{ toneLabel(tone(node.job)) }}</div>
+              <div class="dag-status">
+                {{ toneLabel(tone(node.job)) }}
+                <span v-if="tone(node.job) === 'running'" class="live-hint">执行中</span>
+              </div>
               <div class="dag-foot">
-                <span class="dag-dur">{{ formatDurationShort(node.job.durationMs) }}</span>
+                <span class="dag-dur" :class="{ live: tone(node.job) === 'running' }">
+                  {{ formatDurationShort(durationOf(node.job)) }}
+                </span>
                 <span class="dag-steps">{{ node.job.steps?.length ?? 0 }} 步</span>
               </div>
             </div>
@@ -542,6 +588,44 @@ function tooltipOf(job: RunJob): string {
 }
 .dag-node.running .dag-dot {
   background: #1677ff;
+}
+
+/* 运行中的节点：转圈 + 淡蓝描边，一眼能看出「正在跑」 */
+.dag-node.running {
+  border-color: #bedaff;
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.08), 0 2px 10px rgba(22, 119, 255, 0.12);
+}
+
+.dag-dot.spinning {
+  overflow: hidden;
+  padding: 0;
+}
+
+.spinner {
+  width: 100%;
+  height: 100%;
+  animation: dag-spin 0.9s linear infinite;
+}
+
+@keyframes dag-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.live-hint {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(22, 119, 255, 0.08);
+  color: #1677ff;
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.dag-dur.live {
+  color: #1677ff;
+  font-weight: 600;
 }
 .dag-node.cancelled .dag-dot {
   background: #fa8c16;

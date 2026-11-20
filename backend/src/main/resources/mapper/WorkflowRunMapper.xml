@@ -27,8 +27,17 @@
         <include refid="windowFilters"/>
     </select>
 
+    <!--
+      stat_day 必须显式映射到 DailyStatRow.day。
+      mapUnderscoreToCamelCase 会把 stat_day 推成 statDay，字段对不上就被静默丢弃，
+      结果每一行都被 service 当成「没有这一天的数据」丢掉 —— 趋势图会永远全 0。
+    -->
+    <resultMap id="dailyStatRowMap" type="com.githublook.stats.model.DailyStatRow">
+        <result column="stat_day" property="day"/>
+    </resultMap>
+
     <!-- One row per day that actually has finished runs; the service fills empty days. -->
-    <select id="dailyStats" resultType="com.githublook.stats.model.DailyStatRow">
+    <select id="dailyStats" resultMap="dailyStatRowMap">
         SELECT
             CAST(started_at AS DATE) AS stat_day,
             COUNT(*) AS total,
