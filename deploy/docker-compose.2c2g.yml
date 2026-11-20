@@ -1,0 +1,51 @@
+# 2 核 2G 服务器的压缩配置（override）
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.2c2g.yml up -d
+#
+# 思路：给每个容器设内存上限（mem_limit 是天花板，不是预分配），
+# 同时关掉 MySQL 里最吃内存的 performance_schema，并给 JVM 钉死堆上限，
+# 避免 JVM 按「宿主 2G 的 75%」去申请 1.5G。
+
+services:
+  mysql:
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      # 关键三项：缓冲池收窄、关闭性能库、少留连接
+      - --innodb-buffer-pool-size=128M
+      - --performance-schema=OFF
+      - --max-connections=60
+      - --table-open-cache=256
+      - --skip-name-resolve
+    mem_limit: 600m
+
+  redis:
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 128mb
+      # 队列 key 不能被淘汰：宁可写失败（有 DB 兜底）也不要静默丢事件
+      - --maxmemory-policy
+      - noeviction
+    mem_limit: 160m
+
+  backend:
+    environment:
+      # 钉死堆上限：本应用实测堆只用 ~80MB，320M 足够。
+      # 显式 -Xmx 会覆盖 Dockerfile 里的 MaxRAMPercentage，避免按宿主 2G 的 75% 申请 1.5G。
+      JAVA_OPTS: >-
+        -Xms192m -Xmx320m -XX:MaxMetaspaceSize=160m
+        -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError
+        -Duser.timezone=Asia/Shanghai
+      DB_POOL_SIZE: 5
+      QUEUE_CONSUMERS: 4
+    mem_limit: 640m
+
+  web:
+    mem_limit: 64m

@@ -1,0 +1,32 @@
+# ---- build stage ----
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /app
+
+# 先只拷 pom，利用镜像层缓存把依赖下载和源码变更拆开
+COPY backend/pom.xml .
+RUN mvn -B -q -DskipTests dependency:go-offline
+
+COPY backend/src ./src
+RUN mvn -B -q -DskipTests clean package
+
+# ---- runtime stage ----
+FROM eclipse-temurin:21-jre-alpine
+
+# curl 供 HEALTHCHECK 使用；tzdata 保证时间按 Asia/Shanghai 显示
+RUN apk add --no-cache curl tzdata \
+    && addgroup -S app && adduser -S app -G app
+
+WORKDIR /app
+COPY --from=build /app/target/*.jar app.jar
+RUN chown -R app:app /app
+
+USER app
+ENV TZ=Asia/Shanghai \
+    JAVA_OPTS="-XX:MaxRAMPercentage=75 -XX:+UseG1GC -Duser.timezone=Asia/Shanghai"
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:8080/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar app.jar"]

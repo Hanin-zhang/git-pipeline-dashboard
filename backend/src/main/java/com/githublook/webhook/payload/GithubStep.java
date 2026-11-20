@@ -1,0 +1,16 @@
+package com.githublook.webhook.payload;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+import java.time.Instant;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+public record GithubStep(
+        String name,
+        Integer number,
+        String status,
+        String conclusion,
+        @JsonProperty("started_at") Instant startedAt,
+        @JsonProperty("completed_at") Instant completedAt) {
+}
