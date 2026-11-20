@@ -1,201 +1,314 @@
 # GitHub Look · CI/CD 观测看板
 
-对接 GitHub Actions 的实时构建看板：Webhook 进来 → 验签 → 幂等去重 → Redis 队列 → 虚拟线程异步落库 → SSE 秒级推到前端。
+把 GitHub Actions 的构建过程变成一块可看的实时看板：**Webhook 进来 → 验签 → 幂等去重 → Redis 队列 → 虚拟线程异步落库 → SSE 秒级推送到浏览器**。
 
-**技术栈**：JDK 21（虚拟线程）· Spring Boot 3.3 · MyBatis-Plus 3.5 · Redis 8 · Flyway · H2/MySQL · Vue 3 + Vite 6 + Element Plus + ECharts
-**部署**：本期不做 Docker / Nginx / SSL（按你的要求跳过），本地直跑。
+不再靠刷新 gh 页面猜哪次构建卡住了——流水线拓扑、job/step 耗时、失败定位、执行日志都在一屏。
+
+| | |
+| --- | --- |
+| **当前版本** | `1.2.2` |
+| **技术栈** | JDK 21（虚拟线程）· Spring Boot 3.3 · MyBatis-Plus 3.5 · Flyway · Redis 7 · MySQL 8 / H2 · Vue 3 + Vite 6 + Element Plus + ECharts |
+| **部署形态** | Docker Compose（MySQL + Redis + 后端 + Nginx），也支持本地直跑 |
 
 ---
 
-## 一、快速开始
+## 一、它能做什么
 
-前置：JDK 21、Maven 3.9+、Node 18+、Redis（`brew install redis`）。
+| 能力 | 说明 |
+| --- | --- |
+| **实时看板** | 今日/昨日成功率、活跃运行、队列深度、7~90 天趋势（按天/按周）、工作流健康度排名 |
+| **流水线拓扑** | 节点=job、并行分支自动分列，运行中的节点转圈并实时计时 |
+| **三级明细** | run → job → step，任一层都能定位到耗时与结论 |
+| **执行日志** | 抽屉里按需从 GitHub 拉取，错误行高亮、5 分钟缓存、失败自动重试 |
+| **失败定位** | 直接指出哪个 job 的哪个 step 失败，附带历史成功率对比 |
+| **操作** | 重新运行 / 取消运行（需 `GITHUB_TOKEN`），补拉历史运行的 job 明细 |
+| **接入管理** | 多仓库、独立 Secret、二次验证保护、钉钉/飞书/Webhook 告警 |
+
+---
+
+## 二、快速开始（本地开发）
+
+前置：JDK 21、Maven 3.9+、Node 18+、Redis。
 
 ```bash
-# 方式 A：一键脚本（推荐）
+# 方式 A：一键脚本
 ./scripts/dev.sh
 
 # 方式 B：分别启动
 redis-server --daemonize yes --port 6379 --save '' --appendonly no
-cd backend && mvn spring-boot:run          # http://localhost:8080
-cd frontend && npm install && npm run dev   # http://localhost:5173
+cd backend  && mvn spring-boot:run          # http://localhost:8080
+cd frontend && npm install && npm run dev    # http://localhost:5173
 ```
 
 打开 <http://localhost:5173>，默认账号 **admin / admin123**（`ADMIN_USERNAME` / `ADMIN_PASSWORD` 可覆盖）。
 
-首次启动会自动完成：Flyway 建表 → 创建管理员 → 灌入 7 天演示数据（3 个仓库 / 105 次运行），所以打开就有完整图表可看。
+首次启动自动完成：Flyway 建表 → 创建管理员 → 灌入 7 天演示数据，打开就有完整图表。
 
-## 二、验收路径
-
-| 步骤 | 操作 | 预期 |
-| --- | --- | --- |
-| 1 | 登录 | 进入全局概览，4 张指标卡 + 7 天趋势 + 实时事件流 |
-| 2 | 切换仓库 / 分支 / 7-14-30 天 / 按天按周 | 图表与卡片联动刷新 |
-| 3 | 开两个标签页都停在概览页 | 执行下面第 4 步，两边**同时**出现新事件（SSE 广播） |
-| 4 | `python3 scripts/simulate_webhook.py --mode live` | 先出现「运行中」，4 秒后同一行变「成功」，无需刷新 |
-| 5 | `python3 scripts/simulate_webhook.py --mode failure` | 出现红色失败事件；流水线列表多一条失败记录 |
-| 6 | 点流水线列表任意一行 | 进入运行详情，顶部是**流水线 DAG 视图**（节点=job，并行分支自动分列），下方是 job/step 明细，点节点会展开并定位到对应 job |
-| 7 | 设置与接入页 | Payload URL 可复制（默认 `http://123.56.106.44:8188/api/webhooks/github`）；仓库 Secret 可显示/重新生成；通知配置可保存 |
-
-GitHub 上填的 Security 值：**`hanin-github`**（三个演示仓库的 Secret 已统一改成这个值；也可用 `GITHUB_WEBHOOK_SECRET` 环境变量覆盖）。
-
-模拟器会按 GitHub 真实格式构造 payload 并用 HMAC-SHA256 签名，走的是和线上完全一致的验签链路。
+### 灌演示事件
 
 ```bash
-python3 scripts/simulate_webhook.py --mode live       # 开始 -> 成功
+python3 scripts/simulate_webhook.py --mode live      # 运行中 → 成功
 python3 scripts/simulate_webhook.py --mode failure    # 一次失败运行
 python3 scripts/simulate_webhook.py --mode burst --count 10
-python3 scripts/simulate_webhook.py --repo pcxx/data-sync --branch develop --secret <某个仓库的 Secret>
+python3 scripts/simulate_webhook.py --repo pcxx/data-sync --branch develop --secret <仓库 Secret>
 ```
 
-## 三、接口清单
+模拟器按 GitHub 真实格式构造 payload 并做 HMAC-SHA256 签名，走的是和线上完全一致的验签链路。
+
+---
+
+## 三、部署（线上）
+
+两条路径，**产物部署**是推荐方式——服务器上不需要 JDK / Maven / Node。
+
+### 方式 A：产物部署（推荐）
+
+交付包结构（每次发版一个，带版本号与构建信息）：
+
+```
+github-look-<版本>-<时间戳>/
+├── backend/github-look-backend-<版本>.jar
+├── frontend-dist/
+├── Dockerfile.backend      # 只 COPY 产物，不编译
+├── Dockerfile.web
+├── nginx.conf
+├── docker-compose.yml
+├── .env.example
+├── VERSION
+└── BUILD-INFO.txt          # 版本 / 构建时间 / sha256 / 本版变更
+```
+
+```bash
+# 1. 首次：拷到服务器并初始化配置
+scp -r github-look-1.2.2-* user@host:/home/app/github-look/
+ssh user@host 'cd /home/app/github-look && cp .env.example .env'
+
+# 2. 改 .env（6 个必填项，见第六节）
+vi .env
+
+# 3. 启动
+docker compose up -d --build
+docker compose ps
+```
+
+**升级**（只换产物，数据库卷不动）：
+
+```bash
+# ⚠️ 先删旧 jar：镜像构建靠 backend/*.jar 通配符，两个 jar 并存会构建失败
+ssh user@host 'rm -f /home/app/github-look/backend/github-look-backend-<旧版本>.jar'
+
+scp backend/github-look-backend-<新版本>.jar user@host:/home/app/github-look/backend/
+tar czf - frontend-dist | ssh user@host 'cd /home/app/github-look && rm -rf frontend-dist && tar xzf -'
+
+ssh user@host 'cd /home/app/github-look && docker compose up -d --build backend web'
+```
+
+验证版本：
+
+```bash
+docker compose logs backend | grep "Starting GithubLookApplication"
+# → Starting GithubLookApplication v1.2.2 ...
+```
+
+### 方式 B：源码部署（CI / 开发机）
+
+```bash
+cp .env.docker.example .env
+docker compose up -d --build          # 根目录 compose 会用 Maven/Node 多阶段镜像
+```
+
+| 文件 | 用途 |
+| --- | --- |
+| `docker-compose.yml`（根） | 源码构建版：Maven → JRE、Node → Nginx |
+| `deploy/artifacts/` | 产物部署版：只 COPY jar 与 dist |
+| `deploy/nginx.conf` | SPA 回退 + `/api` 反代（**SSE 关闭缓冲**）+ 安全头 |
+| `deploy/README.md` | 完整部署手册：HTTPS、备份、排错清单 |
+
+---
+
+## 四、接入 GitHub
+
+1. 设置与接入 → 解锁（`SETTINGS_ACCESS_PASSWORD`）→ 接入仓库
+   - 地址支持 `owner/repo`、`https://github.com/owner/repo`、`.../repo.git`、`.../tree/main`、`git@github.com:owner/repo.git`
+   - **Webhook Secret 必填**，留空需勾选「自动生成」
+2. GitHub 仓库 → Settings → Webhooks → Add webhook
+   - Payload URL：`https://你的域名/api/webhooks/github`（**末尾不要加 `/`**）
+   - Content type：`application/json`
+   - Secret：与上一步完全一致
+   - 事件：勾 **Workflow runs**（数据全部来自这个事件）
+3. `GITHUB_TOKEN` 建议同时配置——没有它，看板只有 run 没有 job 明细，也拉不到日志
+
+---
+
+## 五、接口清单
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/webhooks/github` | GitHub Webhook 入口（HMAC 验签，免登录） |
-| POST | `/api/auth/login` `/logout` | 登录 / 退出（JWT 写入 httpOnly Cookie） |
+| POST | `/api/webhooks/github` | Webhook 入口（HMAC 验签，免登录） |
+| POST | `/api/auth/login` `/logout` | 登录 / 退出（JWT 写 httpOnly Cookie） |
 | GET | `/api/auth/me` | 当前会话 |
-| GET | `/api/dashboard/summary` | 今日/昨日指标窗口、活跃运行、队列深度 |
+| GET | `/api/capabilities` | 能力开关（是否配了 Token / 是否解锁设置） |
+| GET | `/api/dashboard/summary` | 今日/昨日窗口、活跃运行、队列深度、SSE 连接数 |
 | GET | `/api/dashboard/trend?days=&granularity=day\|week` | 趋势聚合 |
 | GET | `/api/dashboard/workflows` | 工作流失败率与耗时排名 |
-| GET | `/api/dashboard/recent` | 实时事件流首屏填充 |
-| GET | `/api/runs?page=&size=&status=&repo=&branch=&q=&workflow=&from=&to=` | 分页 + 多维筛选（`workflow` 用于详情页拉同工作流历史） |
+| GET | `/api/dashboard/recent` | 实时事件流首屏 |
+| GET | `/api/runs?page=&size=&status=&repo=&branch=&q=&workflow=&from=&to=` | 分页 + 多维筛选 |
 | GET | `/api/runs/{id}` | 运行详情（job / step） |
 | GET | `/api/runs/filters` | 筛选项候选值 |
+| POST | `/api/runs/{id}/rerun` | 重新运行（需 Token + Actions:write） |
+| POST | `/api/runs/{id}/cancel` | 取消运行（需 Token + Actions:write） |
+| POST | `/api/runs/{id}/sync-jobs` | 从 Actions API 补拉 job/step 明细 |
+| GET | `/api/runs/{runId}/jobs/{jobId}/logs` | 执行日志（纯文本，2MB 截断） |
 | GET/POST/PUT/DELETE | `/api/repos` `/api/repos/{id}` | 仓库接入管理 |
-| GET | `/api/settings` · PUT `/api/settings/notifications/{channel}` | 接入信息 / 告警配置 |
-| GET | `/api/stream` | SSE 事件流（`ready` / `run.started` / `run.updated` / `run.completed` / `run.failed`） |
+| GET | `/api/settings` · POST `/api/settings/unlock` | 接入信息 / 二次验证 |
+| PUT | `/api/settings/notifications/{channel}` | 告警配置 |
+| GET | `/api/stream?cid=` | SSE 事件流（`ready`/`run.*`） |
 | GET | `/actuator/health` | 健康检查（含 Redis 探针） |
 
-## 四、关键设计
+---
 
-**Webhook 快进快出**：请求线程只做「验签 → 占用 delivery id → 推 Redis」，耗时几毫秒，GitHub 侧永远看到 202，解析与落库全部交给消费者。
+## 六、配置项
 
-**幂等双保险**：Redis `SET NX EX`（24h）挡重复投递；`webhook_delivery.delivery_id` 唯一索引做持久化兜底。Redis 挂了会自动降级到数据库约束，不会丢事件。
+全部来自环境变量，启动时由 `ConfigValidator` 集中校验（JWT Secret 不足 32 位、生产环境用默认密码等直接拒绝启动）。
 
-**虚拟线程消费**：8 个消费者跑在 `Thread.ofVirtual()` 上，空闲时 `parkNanos` 让出，队列深了自动加并发也不会撑爆线程栈。失败重试 3 次后进死信 Hash + 审计表标记 FAILED。
+**必改 6 项**：`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、`APP_JWT_SECRET`、`ADMIN_PASSWORD`、`SETTINGS_ACCESS_PASSWORD`、`GITHUB_WEBHOOK_SECRET`，外加 `PUBLIC_BASE_URL` 指向公网地址。
 
-**统计缓存**：`StatsCache` 用版本号而不是 `SCAN`/`KEYS` 失效——每次写入 run 就 `INCR` 版本号，旧 key 自然过期，Redis 里不会堆积野键。
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `QUEUE_CONSUMERS` | `8`（compose 里给 `16`） | 队列消费者数（虚拟线程），**必须 ≤ `DB_POOL_SIZE`** |
+| `DB_POOL_SIZE` | `10`（compose 里给 `16`） | Hikari 连接池上限 |
+| `GITHUB_TOKEN` | 空 | 配了才能同步 job 明细、拉日志、重跑/取消 |
+| `GITHUB_API_URL` | `https://api.github.com` | GitHub Enterprise 改这里 |
+| `DEMO_DATA_ENABLED` | `false`（prod） | 是否灌演示数据 |
+| `WEBHOOK_AUTO_REGISTER` | `true` | 未知仓库首次投递时自动登记 |
+| `COOKIE_SECURE` | `false` | 上 HTTPS 后必须改 `true` |
+| `ALLOWED_ORIGINS` | — | 与浏览器地址一致（协议+域名+端口） |
+| `IMAGE_TAG` / `BACKEND_IMAGE` / `WEB_IMAGE` | — | 走镜像部署时由 CD 写入 |
 
-**认证**：JWT 存 httpOnly + SameSite=Lax Cookie（不进 localStorage、不进 URL），所以 `EventSource` 天然带凭据；登录失败 5 分钟 10 次上限。
+切换 MySQL 只需覆盖 `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` / `DB_DRIVER`，Flyway 迁移 SQL 双兼容，分页方言自动选择。
 
-**设置页二次验证**：`/api/settings/**` 与 `/api/repos/**` 需要额外权限 `ROLE_SETTINGS_ADMIN`，它只由「解锁」签发的短期令牌提供。
+---
+
+## 七、核心链路
 
 ```
-登录（你是谁）→ 输入访问密码 → 种 gl_settings Cookie（默认 30 分钟）
-             → 期间可读写 Secret / 仓库 / 通知 → 过期自动回到密码页
+GitHub POST /api/webhooks/github
+   │
+   ├─ 验签：按 repository.full_name 找仓库 Secret，HMAC-SHA256 比对原始 body
+   ├─ 幂等：Redis SETNX(delivery_id, 24h) + webhook_delivery 唯一索引（双保险）
+   ├─ 入队：LPUSH ghl:queue，立即 202（全程 5~15ms，不受 GitHub 10s 超时影响）
+   │
+   └─ 消费者（虚拟线程 × N）
+        ├─ workflow_run → upsert workflow_run（唯一键 repo + external_run_id）
+        ├─ 补 job/step → 调 Actions API GET /runs/{id}/jobs，按 external_job_id 增量 upsert
+        ├─ push 事件 → 补齐 commit message
+        ├─ 作废统计缓存 + SSE 广播
+        └─ 审计状态置 PROCESSED / IGNORED / FAILED
 ```
 
-密码来自 `app.security.settings-password`，最终由环境变量 `SETTINGS_ACCESS_PASSWORD` 注入；与登录密码相互独立，改密码不用改代码。输错同样受限流保护（5 分钟 10 次）。
+**幂等双保险**：Redis `SET NX EX` 挡重复投递；`webhook_delivery.delivery_id` 唯一索引做持久化兜底。Redis 挂了会降级到数据库约束，不丢事件。
 
-## 五、目录结构
+**状态单调性**：一次运行会收到 `queued → in_progress → completed` 多个事件，并发消费时可能乱序。写入用 `UPDATE ... WHERE` 条件保证「已产出结论的行不允许被非完成态覆盖」，从数据库层杜绝状态回退。
+
+**job 增量 upsert**：按 `external_job_id` 就地更新，主键稳定、不制造 DELETE 风暴，并发也不会产生重复行。
+
+**统计缓存**：`StatsCache` 用版本号失效而非 `SCAN`/`KEYS`——每次写入 `INCR` 版本号，旧 key 自然过期，Redis 里不堆野键。
+
+**SSE 连接管理**：浏览器用 `sessionStorage` 里的标签页 id 作 `cid`，服务端以它为键**顶替**旧连接；30 分钟兜底超时 + 身份校验式删除。刷新多少次都只算一条连接。
+
+**执行日志**：不落库，按需代理 GitHub Logs API（302 跳转手动跟随，跳转后**不带 token**）；60 秒专用超时、3 次重试、2MB 截断、5 分钟内存缓存。
+
+---
+
+## 八、认证与权限
+
+JWT 存 httpOnly + SameSite=Lax Cookie（不进 localStorage、不进 URL），所以 `EventSource` 天然带凭据；登录失败 5 分钟 10 次上限。
+
+设置页二次验证：`/api/settings/**` 与 `/api/repos/**` 需要 `ROLE_SETTINGS_ADMIN`，只由「解锁」签发的短期令牌（默认 30 分钟）提供。与登录密码相互独立。
+
+---
+
+## 九、CI / CD
+
+| 工作流 | 触发 | 内容 |
+| --- | --- | --- |
+| `.github/workflows/ci.yml` | push / PR / 手动 | 探测模块 → JDK 21 `mvn verify` → Node 22 `npm ci` + 类型检查 + 单测 + 构建 → 真启动冒烟（Redis + 5 个接口断言）→ `CI gate` 汇总 |
+| `.github/workflows/cd.yml` | 打 `v*` 标签 / 手动 | 构建镜像推 GHCR → SSH 部署 → 健康探针（`/api/auth/me` 返回 401 视为就绪）→ 80 秒内未就绪自动回滚上一版 |
+
+CI 里的「模块探测」会先判断 `backend/`、`frontend/` 是否存在、npm script 是否齐全，缺失就跳过对应任务而不是报红。
+
+---
+
+## 十、目录结构
 
 ```
 backend/src/main/java/com/githublook/
 ├── auth/        登录、JWT、限流、管理员初始化
 ├── common/      配置校验、类型化错误、全局异常、请求 ID、时间映射
-├── repo/        仓库接入（含 Secret 解析）
-├── run/         运行聚合的读写（RunWriteService / RunQueryService）
+├── github/      Actions API 客户端、job 明细同步
+├── repo/        仓库接入（含地址归一化、Secret 解析）
+├── run/         运行聚合读写、日志代理、重跑/取消
 ├── stats/       看板聚合与缓存
-├── settings/    接入信息、通知配置、失败告警
+├── settings/    接入信息、通知配置、能力开关
 ├── stream/      SSE Hub
 ├── webhook/     入口、验签、幂等、队列、消费者、事件处理器
 └── seed/        演示数据
+
 frontend/src/
 ├── api/         类型化 fetch 客户端（401 跳登录、5xx 重试、错误中文化）
-├── components/  StatusPill、BaseChart、PipelineDag（DAG 画布）、MiniPipeline（列表缩略流水线）
-├── composables/ useRunStream（单例 SSE + 退避重连）
+├── components/  StatusPill、PipelineDag、MiniPipeline、run/* 七个详情组件
+├── composables/ useRunStream（单例 SSE + 退避重连 + 标签页 cid）
 ├── layouts/     AppLayout
 └── views/       Dashboard / Pipelines / RunDetail / Settings / Login
+
+deploy/          Dockerfile（源码版/产物版）、nginx.conf、部署手册
+release/         发版产物（带版本号与 BUILD-INFO）
 scripts/         dev.sh、simulate_webhook.py
 ```
 
-## 六、配置与切换 MySQL
-所有配置集中在 `backend/src/main/resources/application.yml`，启动时由 `ConfigValidator` 集中校验（JWT Secret 不足 32 位、prod profile 用默认密码等直接拒绝启动）。可覆盖的环境变量见根目录 `.env.example`。
+数据库三张主表：`workflow_run`（一次构建）→ `run_job`（一个 job）→ `run_step`（一个步骤），另有三张辅助表 `monitored_repo` / `webhook_delivery` / `notification_setting`。迁移由 Flyway 在**后端启动时**执行，MySQL 容器只负责首次建库建用户。
 
-切 MySQL 只需三行环境变量（Flyway 迁移 SQL 是双兼容的）：
+---
 
-```bash
-DB_URL="jdbc:mysql://localhost:3306/github_look?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8" \
-DB_USERNAME=github_look DB_PASSWORD=*** DB_DRIVER=com.mysql.cj.jdbc.Driver \
-mvn spring-boot:run
-```
+## 十一、版本记录
 
-分页方言按实际 JDBC 连接自动选择，不需要改代码。
-
-### GitHub Token（可选，用于重跑 / 取消）
-
-```bash
-export GITHUB_TOKEN=ghp_xxxxxxxx        # 经典 PAT 或 fine-grained PAT
-export GITHUB_API_URL=https://api.github.com   # GHE 部署时改成自己的地址
-```
-
-- 配置读取位置：`app.github.token`；启动日志只打印 `GitHub API enabled/disabled`，**从不打印 token**
-- 前端通过 `GET /api/capabilities` 拿能力开关，决定按钮能否点击
-- 未配置时：按钮置灰 + 悬浮说明，接口返回 `503`，不会伪造成功
-
-| 操作 | GitHub API | 所需权限 |
-| --- | --- | --- |
-| 重新运行 | `POST /repos/{o}/{r}/actions/runs/{id}/rerun` | Actions: write |
-| 取消运行 | `POST /repos/{o}/{r}/actions/runs/{id}/cancel` | Actions: write |
-| Job 明细（补充 steps） | `GET .../runs/{id}/jobs` | Actions: read |
-| 日志正文 | `GET .../jobs/{id}/logs` | Actions: read |
-| Artifact | `GET .../runs/{id}/artifacts` | Actions: read |
-
-已实现的是「重新运行 / 取消运行」；后三项客户端方法尚未接入页面（见第八节）。
-
-## 七、运行详情页（可视化与排查）
-
-详情页由 7 个独立组件拼装，页面本身只做数据编排：
-
-| 区域 | 组件 | 数据来源 |
-| --- | --- | --- |
-| 顶部信息与操作 | `run/RunHeader.vue` | run 详情，SHA/链接可复制 |
-| 状态摘要 / 失败定位 | `run/RunAlert.vue` | 失败 job + 失败 step 实时计算 |
-| 运行统计 + 历史对比 | `run/RunStats.vue` | 本次 job/step + 同 workflow 最近 10 次 |
-| 流水线拓扑 | `PipelineDag.vue` | `run_job.needs` 真实依赖 |
-| Job / Step 明细 | `run/JobAccordion.vue` | job + steps |
-| 步骤详情抽屉 | `run/StepDrawer.vue` | 步骤元数据 |
-| 右侧信息面板 | `run/RunInfoPanel.vue` | commit / runner / 链路信息 |
-
-**DAG 依赖是真的**：`workflow_run` 事件本身不带 `needs`，所以后端在 `run_job` 上新增了 `needs` 列（V2 迁移），由事件 payload 里的 `jobs[].needs` 写入，前端按「最长路径」分层：同一层即并行。
-如果某次运行的 job 没有任何 `needs`，前端**不会**按名称猜依赖，而是降级为「按执行顺序」布局并在图例处写明 `未提供依赖数据，按执行顺序展示`。
-
-## 八、受后端能力限制、暂未实现的功能
-
-这些入口都做了「明确标记或隐藏」，没有伪造成功反馈：
-
-| 功能 | 现状 | 原因 |
-| --- | --- | --- |
-| 重新运行 / 取消运行 | **已实现**，需配置 `GITHUB_TOKEN`；未配置时按钮置灰、接口 503 | 依赖 GitHub Actions API |
-| 日志正文 / 关键字高亮 / 日志下载 | 抽屉里给出状态与时间线，日志区标注「未接入」 | GitHub 事件不含日志文本，需调 Actions Logs API |
-| 错误信息摘要 | 失败横幅给出 job/step/时间，错误文本处为空状态说明 | 同上，事件不携带错误文本 |
-| Artifact 产物列表 | 右侧面板预留分组，展示空状态说明 | 事件不携带 artifacts |
-| 运行中状态实时刷新 | 未做（详情页数据在进入时加载一次） | 需要按 runId 的 SSE 增量事件，当前 SSE 只推列表级事件 |
-
-## 九、已知边界
-
-1. **job/step 明细来源**：GitHub 的 `workflow_run` 事件本身不带 jobs。真实接入时要么额外订阅 `workflow_job` 事件（当前代码会记为 IGNORED，未落库），要么调 REST API 补拉；本地演示由模拟器直接带上 jobs，所以详情页是完整的。
-2. **部署未包含**：Dockerfile / Nginx / HTTPS 按你的要求本轮跳过，上线前还需要：`COOKIE_SECURE=true`、`PUBLIC_BASE_URL` 换成公网域名、反向代理对 `/api/stream` 关闭缓冲（`proxy_buffering off`）。
-3. **告警只做单向通知**：钉钉/飞书/通用 Webhook 发送失败只记 warn 日志，不重试，避免阻塞主链路。
-
-## 十、部署（Docker Compose）
-
-一条命令拉起 MySQL + Redis + 后端 + Nginx：
-
-```bash
-cp .env.docker.example .env   # 填 6 个必填项（见下表）
-docker compose up -d --build
-```
-
-| 目录/文件 | 作用 |
+| 版本 | 内容 |
 | --- | --- |
-| `docker-compose.yml` | 4 个服务编排（mysql / redis / backend / web）+ 健康检查 + 依赖顺序 |
-| `deploy/Dockerfile.backend` | 多阶段构建：Maven 打包 → JRE 21 Alpine 运行（非 root 用户） |
-| `deploy/Dockerfile.frontend` | Node 构建 → Nginx 托管静态资源 |
-| `deploy/nginx.conf` | SPA 回退 + `/api` 反代（**SSE 关闭缓冲**）+ 安全头 |
-| `deploy/README.md` | 完整部署手册：环境变量、验收命令、HTTPS、备份、排错清单 |
+| `1.2.2` | 执行日志加稳定性：60s 专用超时、3 次重试（blob 存储偶发断连） |
+| `1.2.1` | 修复日志为空：GitHub 返回 302，客户端未跟随且跳转后会泄露 token |
+| `1.2.0` | 状态回退修复（`UPDATE ... WHERE` + Flyway V3 修数据）、趋势图字段映射、图例重叠、进度条宽度、job 增量 upsert、连接池/消费者可配、执行日志接入 |
 
-必改的 6 个环境变量：`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、`APP_JWT_SECRET`、`ADMIN_PASSWORD`、`SETTINGS_ACCESS_PASSWORD`、`GITHUB_WEBHOOK_SECRET`，外加 `PUBLIC_BASE_URL` 指向你的公网地址。
+---
 
-生产建议：`WEBHOOK_AUTO_REGISTER=false`、`DEMO_DATA_ENABLED=false`、全站 HTTPS 后 `COOKIE_SECURE=true`。
+## 十二、排错
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| GitHub 显示 **404** | Payload URL 末尾多了 `/` | 删掉斜杠（后端已做容错，建议仍用标准形式） |
+| GitHub 显示 **401** | 仓库 Secret 与 GitHub 填的不一致 | 设置页「显示」Secret 后两边对齐 |
+| **202 但页面没数据** | 事件类型没勾 / 队列积压 | 勾上 Workflow runs；查 `webhook_delivery` 状态 |
+| **有 run 没有流水线图** | 缺 `GITHUB_TOKEN` 或 token 无该仓库权限 | 配 Token 后点「同步 Job 明细」 |
+| **运行一直显示「运行中」** | 1.2.0 之前的状态回退问题 | 升级到 1.2.0+（V3 迁移会自动修历史数据） |
+| **日志返回 32 字节** | 还没升级到 1.2.1+ | 升级后应为几万字节的真实文本 |
+| 复制按钮无效 | 非安全上下文没有 clipboard API | 1.1.0+ 已用 `execCommand` 兜底 |
+| 构建报 `more than one source file` | `backend/` 里有多个 jar | 删掉旧 jar |
+
+```bash
+# 投递处理状态
+docker compose exec mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" github_look \
+  -e "SELECT delivery_id,event_name,status,attempts,last_error FROM webhook_delivery ORDER BY id DESC LIMIT 10;"'
+
+# 迁移版本
+docker compose exec mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" github_look \
+  -e "SELECT version,description,success FROM flyway_schema_history ORDER BY installed_rank;"'
+```
+
+---
+
+## 十三、已知边界
+
+1. **Artifact 产物列表**未接入（事件不携带 artifacts，需要额外调 API 并落库）
+2. **详情页不做逐条事件刷新**：SSE 只推列表级事件，详情页在进入时加载一次（运行中的耗时靠前端本地计时）
+3. **告警单向通知**：钉钉/飞书发送失败只记 warn，不重试，避免阻塞主链路
+4. **DB 数据不可随镜像回滚**：Flyway 已执行的「改数据」型迁移（如 V3）不可逆，上线前先备份
+5. **不支持多副本 backend**：SSE 是进程内广播，横向扩容需先接 Redis Pub/Sub
