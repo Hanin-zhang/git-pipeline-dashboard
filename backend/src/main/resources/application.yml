@@ -85,7 +85,13 @@ logging:
     com.githublook: ${LOG_LEVEL:INFO}
 
 app:
-  # Shown on the Settings page so users can copy a URL GitHub can actually reach.
+  # 历史失败摘要回刷：解析规则升级（LogDigestCodec.VERSION +1）后，用夜间任务把旧摘要重算一遍。
+  # 天然幂等——跑完版本号就上去了，下一轮自动跳过。
+  digest:
+    backfill-enabled: ${DIGEST_BACKFILL_ENABLED:true}
+    backfill-limit: ${DIGEST_BACKFILL_LIMIT:50}
+    backfill-cron: ${DIGEST_BACKFILL_CRON:0 30 2 * * ?}
+  # Shown on the Settings page so users can set a URL GitHub can actually reach.
   public-base-url: ${PUBLIC_BASE_URL:http://123.56.106.44:8188}
   zone-id: ${APP_ZONE:Asia/Shanghai}
   # GitHub REST API：配置 token 后才能重跑 / 取消 / 拉日志 / 拉产物。

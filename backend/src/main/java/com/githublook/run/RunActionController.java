@@ -50,4 +50,11 @@ public class RunActionController {
                 .contentType(new MediaType(MediaType.TEXT_PLAIN, java.nio.charset.StandardCharsets.UTF_8))
                 .body(body == null || body.isEmpty() ? "（该 job 暂无日志输出）" : body);
     }
+
+    /** 同一次日志的结构化摘要：错误块 + 行号 + 折叠统计 */
+    @GetMapping("/{runId}/jobs/{jobId}/logs/summary")
+    public ResponseEntity<com.githublook.run.log.LogDigest> jobLogSummary(
+            @PathVariable Long runId, @PathVariable Long jobId) {
+        return ResponseEntity.ok(logService.jobLogSummary(runId, jobId));
+    }
 }

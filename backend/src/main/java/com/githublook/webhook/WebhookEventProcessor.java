@@ -28,6 +28,7 @@ public class WebhookEventProcessor {
     private final StatsCache statsCache;
     private final com.githublook.settings.AlertNotifier alertNotifier;
     private final com.githublook.github.GithubJobSyncService jobSyncService;
+    private final com.githublook.run.RunFailureClassifier failureClassifier;
 
     public void process(QueueMessage message) {
         switch (message.eventName()) {
@@ -55,6 +56,11 @@ public class WebhookEventProcessor {
         // 真实事件不带 jobs：配置了 token 就顺带把 job/step 拉回来，否则看板只有一个空壳 run
         java.util.List<com.githublook.webhook.payload.GithubJob> payloadJobs = event.run().jobs();
         jobSyncService.fillIfMissing(outcome.run(), payloadJobs != null && !payloadJobs.isEmpty());
+
+        // 失败完成时异步判定失败原因（拉日志 → 解析 → 写 failure_class），不阻塞消费线程
+        if (outcome.justFinished() && outcome.run().isFailed()) {
+            failureClassifier.classifyAsync(outcome.run());
+        }
 
         statsCache.invalidate();
         sseHub.broadcast(eventName(outcome), toPayload(outcome.run()));

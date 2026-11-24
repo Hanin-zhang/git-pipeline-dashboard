@@ -52,6 +52,18 @@
         ORDER BY stat_day ASC
     </select>
 
+    <!-- 失败原因分布：未归类的行 failure_class 为 null，由 service 单独统计 -->
+    <select id="failureReasons" resultType="com.githublook.stats.model.FailureReasonRow">
+        SELECT
+            failure_class AS failure_class,
+            COUNT(*) AS total
+        FROM workflow_run
+        WHERE conclusion IN ('failure', 'timed_out', 'startup_failure')
+        <include refid="windowFilters"/>
+        GROUP BY failure_class
+        ORDER BY total DESC
+    </select>
+
     <!-- Noisiest workflows in the window: highest failure count first. -->
     <select id="workflowStats" resultType="com.githublook.stats.model.WorkflowStatRow">
         SELECT

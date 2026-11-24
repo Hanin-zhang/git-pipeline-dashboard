@@ -2,7 +2,9 @@ import { api, query } from './client'
 import type {
   Capabilities,
   DashboardSummary,
+  FailureReasonStats,
   GateState,
+  LogDigest,
   Notification,
   PageResponse,
   Repo,
@@ -24,6 +26,8 @@ export const dashboardApi = {
     api.get<TrendPoint[]>(`/dashboard/trend${query(params)}`),
   workflows: (params: { days?: number; repo?: string; branch?: string }) =>
     api.get<WorkflowHealth[]>(`/dashboard/workflows${query(params)}`),
+  failureReasons: (params: { days?: number; repo?: string; branch?: string }) =>
+    api.get<FailureReasonStats>(`/dashboard/failure-reasons${query(params)}`),
   recent: (limit = 12) => api.get<RunSummary[]>(`/dashboard/recent${query({ limit })}`),
 }
 
@@ -45,6 +49,9 @@ export const runsApi = {
     api.post<{ runId: number; jobs: number; message: string }>(`/runs/${id}/sync-jobs`),
   /** 单个 job 的执行日志（纯文本） */
   jobLogs: (runId: number, jobId: number) => api.getText(`/runs/${runId}/jobs/${jobId}/logs`),
+  /** 同一次日志的结构化摘要 */
+  jobLogSummary: (runId: number, jobId: number) =>
+    api.get<LogDigest>(`/runs/${runId}/jobs/${jobId}/logs/summary`),
   filters: () => api.get<RunFilters>('/runs/filters'),
   rerun: (id: number) => api.post<RunActionResult>(`/runs/${id}/rerun`),
   cancel: (id: number) => api.post<RunActionResult>(`/runs/${id}/cancel`),

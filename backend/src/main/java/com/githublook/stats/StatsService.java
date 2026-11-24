@@ -7,11 +7,13 @@ import com.githublook.repo.mapper.MonitoredRepoMapper;
 import com.githublook.run.WorkflowRun;
 import com.githublook.run.mapper.WorkflowRunMapper;
 import com.githublook.stats.dto.DashboardSummaryDto;
+import com.githublook.stats.dto.FailureReasonStats;
 import com.githublook.stats.dto.MetricWindow;
 import com.githublook.stats.dto.TrendPointDto;
 import com.githublook.stats.dto.WorkflowHealthDto;
 import com.githublook.stats.model.AggregateRow;
 import com.githublook.stats.model.DailyStatRow;
+import com.githublook.stats.model.FailureReasonRow;
 import com.githublook.stats.model.WorkflowStatRow;
 import com.githublook.stream.SseHub;
 import com.githublook.webhook.DeliveryAuditService;
@@ -118,6 +120,22 @@ public class StatsService {
 
         cache.put(suffix, points, props.getStats().getCacheTtl());
         return points;
+    }
+
+    /**
+     * 失败原因分布。
+     *
+     * <p>不做缓存：归类是在运行结束后异步回写的，缓存会让「刚归类完的失败」看不见；
+     * 而这条 SQL 命中 failure_class 索引 + 时间窗口，开销本来就小。
+     */
+    public FailureReasonStats failureReasons(int days, String repo, String branch) {
+        int window = Math.min(Math.max(days, 1), 90);
+        LocalDate today = time.today();
+        List<FailureReasonRow> rows = runMapper.failureReasons(
+                today.minusDays(window - 1L).atStartOfDay(),
+                today.plusDays(1).atStartOfDay(),
+                blankToNull(repo), blankToNull(branch));
+        return FailureReasonAssembler.assemble(rows, props.getGithub().isConfigured());
     }
 
     public List<WorkflowHealthDto> workflowHealth(int days, String repo, String branch) {

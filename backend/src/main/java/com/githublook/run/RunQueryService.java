@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Optional;
 import java.util.Map;
 
 /** Read side of the run aggregate: filterable pagination and full detail (no N+1). */
@@ -28,6 +29,7 @@ public class RunQueryService {
     private final WorkflowRunMapper runMapper;
     private final RunJobMapper jobMapper;
     private final RunStepMapper stepMapper;
+    private final com.githublook.run.log.LogDigestCodec digestCodec;
     private final RepoService repoService;
 
     public PageResponse<RunSummaryDto> search(RunQuery query) {
@@ -129,12 +131,28 @@ public class RunQueryService {
                                 s.getConclusion(), s.getStartedAt(), s.getCompletedAt()))
                         .toList())).toList();
 
+        // 版本最新 → 当前结论；版本落后但能读出来 → 标记 stale 供前端降级展示
+        Optional<com.githublook.run.log.LogDigest> fresh =
+                digestCodec.decode(run.getFailureDigest(), run.getFailureDigestVersion());
+        Optional<com.githublook.run.log.LogDigest> readable =
+                fresh.isPresent() ? fresh : digestCodec.decodeAny(run.getFailureDigest());
+        boolean failureStale = fresh.isEmpty() && readable.isPresent();
+
+        List<RunDetailDto.FailureHighlightDto> failureHighlights = readable
+                .map(d -> d.highlights().stream()
+                        .map(h -> new RunDetailDto.FailureHighlightDto(h.title(), h.detail(),
+                                h.lineNo(), h.endLine(), h.occurrences()))
+                        .toList())
+                .orElse(List.of());
+
         return new RunDetailDto(run.getId(), run.getExternalRunId(), run.getRepoFullName(),
                 run.getWorkflowName(), run.getRunNumber(), run.getBranch(), run.getEventName(),
                 run.getStatus(), run.getConclusion(), run.getActor(), run.getCommitSha(),
                 run.getCommitMessage(), run.getCommitAuthor(), run.getHtmlUrl(), run.getStartedAt(),
                 run.getCompletedAt(), run.getDurationMs(), run.getCreatedAt(), run.getUpdatedAt(),
-                run.getDeliveryId(), jobDtos);
+                run.getDeliveryId(),
+                run.getFailureClass(), run.getFailureJobName(), run.getFailureSummary(),
+                failureHighlights, failureStale, jobDtos);
     }
 
     public RunFiltersDto filters() {

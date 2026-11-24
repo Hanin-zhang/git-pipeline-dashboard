@@ -24,7 +24,20 @@ public record RunDetailDto(
         LocalDateTime createdAt,
         LocalDateTime updatedAt,
         String deliveryId,
+        /** 失败原因类别（test/build/...），未归类为 null */
+        String failureClass,
+        /** 摘要来自哪个 job 的日志 */
+        String failureJobName,
+        /** 一句话结论，详情页红底高亮展示 */
+        String failureSummary,
+        /** 关键错误块（不含上下文，体积小） */
+        List<FailureHighlightDto> failureHighlights,
+        /** true = 摘要由旧版解析规则生成，仅作参考，建议重新分析 */
+        boolean failureStale,
         List<JobDto> jobs) {
+
+    public record FailureHighlightDto(String title, String detail, int lineNo, int endLine, int occurrences) {
+    }
 
     public record JobDto(
             Long id,
