@@ -3,6 +3,7 @@ package com.githublook.webhook;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.githublook.github.GithubJobSyncService;
+import com.githublook.run.RunFailureClassifier;
 import com.githublook.run.RunWriteService;
 import com.githublook.run.WorkflowRun;
 import com.githublook.settings.AlertNotifier;
@@ -50,6 +51,8 @@ class WebhookEventProcessorTest {
     private AlertNotifier alertNotifier;
     @Mock
     private GithubJobSyncService jobSyncService;
+    @Mock
+    private RunFailureClassifier failureClassifier;
 
     private final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
     private WebhookEventProcessor processor;
@@ -73,7 +76,7 @@ class WebhookEventProcessorTest {
     @BeforeEach
     void setUp() {
         processor = new WebhookEventProcessor(objectMapper, runWriteService, audit,
-                sseHub, statsCache, alertNotifier, jobSyncService);
+                sseHub, statsCache, alertNotifier, jobSyncService, failureClassifier);
     }
 
     private QueueMessage message(String event, String json) {

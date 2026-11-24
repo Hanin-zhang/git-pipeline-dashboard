@@ -136,6 +136,28 @@ public class RunWriteService {
     }
 
     /**
+     * 记录失败原因归类结果（类别 + 失败 job + 一句话结论 + 摘要 JSON）。
+     *
+     * <p>单独走一条 UPDATE，而不是并进 {@code upsert}：
+     * 归类是运行结束之后才发生的（要先下载日志），如果走整行更新会把期间到达的
+     * 其他字段一起覆盖掉。
+     */
+    @Transactional
+    public void updateFailureClassification(Long runId, String failureClass, String jobName,
+                                            String summary, String digest, Integer digestVersion) {
+        if (runId == null || failureClass == null || failureClass.isBlank()) {
+            return;
+        }
+        runMapper.update(null, new LambdaUpdateWrapper<WorkflowRun>()
+                .eq(WorkflowRun::getId, runId)
+                .set(WorkflowRun::getFailureClass, failureClass)
+                .set(WorkflowRun::getFailureJobName, jobName)
+                .set(WorkflowRun::getFailureSummary, truncate(summary, 500))
+                .set(WorkflowRun::getFailureDigest, digest)
+                .set(WorkflowRun::getFailureDigestVersion, digestVersion));
+    }
+
+    /**
      * 同步该 run 的 job / step 明细。
      *
      * <p>按 {@code external_job_id} 做增量 upsert，而不是「全删再全插」：

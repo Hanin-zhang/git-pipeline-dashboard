@@ -39,6 +39,21 @@ public class WorkflowRun {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
+    /** 失败原因归类：test / build / dependency / timeout / permission / network / unknown。未归类为 null。 */
+    private String failureClass;
+
+    /** 第一个失败的 job 名称，摘要就是从这个 job 的日志里得出来的 */
+    private String failureJobName;
+
+    /** 一句话结论，例如「2 处测试失败，集中在 tests/test_order.py」 */
+    private String failureSummary;
+
+    /** 精简版摘要 JSON（去掉了 context），供详情页与列表快速渲染 */
+    private String failureDigest;
+
+    /** 生成 failureDigest 时的解析规则版本，不匹配则视为未命中 */
+    private Integer failureDigestVersion;
+
     public boolean isFinished() {
         return "completed".equals(status) && conclusion != null;
     }

@@ -709,6 +709,67 @@ a {
   background: linear-gradient(90deg, #e5484d, #f57b7e);
 }
 
+.bar-fill.muted {
+  background: #c9cdd4;
+}
+
+/* ---------- 失败原因分布 ---------- */
+.reason-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.reason-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.reason-label {
+  width: 84px;
+  flex: none;
+  font-size: 12px;
+  color: var(--text-secondary, #4e5969);
+}
+
+.reason-count {
+  width: 32px;
+  flex: none;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text, #1d2129);
+}
+
+.reason-percent {
+  width: 52px;
+  flex: none;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-muted, #86909c);
+  font-variant-numeric: tabular-nums;
+}
+
+.reason-empty {
+  padding: 28px 16px;
+  text-align: center;
+  font-size: 12px;
+  color: #a9aeb8;
+}
+
+.reason-tip {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #c0c4cc;
+}
+
+.reason-foot {
+  padding: 0 16px 14px;
+  font-size: 11px;
+  color: #a9aeb8;
+}
+
 .el-table {
   --el-table-border-color: #f0f2f7;
   --el-table-header-bg-color: #fafbfd;

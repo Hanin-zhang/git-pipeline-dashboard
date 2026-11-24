@@ -98,7 +98,26 @@ export interface RunDetail extends RunSummary {
   createdAt?: string
   updatedAt?: string
   deliveryId?: string
+  /** 失败原因类别，未归类时为 null */
+  failureClass?: string | null
+  /** 摘要来自哪个 job 的日志 */
+  failureJobName?: string | null
+  /** 一句话结论，详情页红底高亮展示 */
+  failureSummary?: string | null
+  /** 关键错误块（不含上下文） */
+  failureHighlights?: FailureHighlight[]
+  /** true = 该摘要由旧版解析规则生成，仅供参考 */
+  failureStale?: boolean
   jobs: RunJob[]
+}
+
+export interface FailureHighlight {
+  title: string
+  detail: string
+  lineNo: number
+  /** 错误块结束行；等于 lineNo 表示只有一行 */
+  endLine?: number
+  occurrences: number
 }
 
 export interface PageResponse<T> {
@@ -162,6 +181,44 @@ export interface Session {
 }
 
 /** Payload pushed by the backend on the SSE channel. */
+/** 失败原因分布：百分比以「已归类」为分母 */
+export interface FailureReasonStats {
+  totalFailed: number
+  classified: number
+  unclassified: number
+  /** 是否配置了 GitHub Token（决定能否自动归类） */
+  known: boolean
+  reasons: Array<{
+    failureClass: string
+    label: string
+    count: number
+    percent: number
+  }>
+}
+
+/** 日志摘要：后端把原始日志结构化后的结果 */
+export interface LogDigest {
+  verdict: 'success' | 'failure' | 'unknown'
+  failureClass: string
+  headline: string
+  stats: {
+    totalLines: number
+    errorLines: number
+    collapsedLines: number
+    blockCount: number
+  }
+  highlights: Array<{
+    severity: string
+    category: string
+    title: string
+    detail: string
+    lineNo: number
+    endLine?: number
+    occurrences: number
+    context: string[]
+  }>
+}
+
 export interface RunEvent {
   type: string
   runId: number

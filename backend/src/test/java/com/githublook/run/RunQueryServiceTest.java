@@ -51,6 +51,8 @@ class RunQueryServiceTest {
     @Mock
     private RunStepMapper stepMapper;
     @Mock
+    private com.githublook.run.log.LogDigestCodec digestCodec;
+    @Mock
     private RepoService repoService;
 
     private RunQueryService service;
@@ -62,9 +64,10 @@ class RunQueryServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new RunQueryService(runMapper, jobMapper, stepMapper, repoService);
+        service = new RunQueryService(runMapper, jobMapper, stepMapper, digestCodec, repoService);
         when(jobMapper.selectList(any())).thenReturn(List.of());
         when(stepMapper.selectList(any())).thenReturn(List.of());
+        when(digestCodec.decode(any(), any())).thenReturn(java.util.Optional.empty());
         when(runMapper.distinctBranches(any(Integer.class))).thenReturn(List.of("main", "develop"));
     }
 
@@ -279,6 +282,55 @@ class RunQueryServiceTest {
                     .isInstanceOf(AppException.class)
                     .extracting(e -> ((AppException) e).getCode())
                     .isEqualTo(ErrorCode.NOT_FOUND);
+        }
+
+        @Test
+        @DisplayName("摘要版本落后时标记 stale，但仍返回旧内容供降级展示")
+        void staleDigestStillReadable() {
+            WorkflowRun run = run(1, "completed", "failure");
+            run.setFailureClass("test");
+            run.setFailureJobName("Java · 构建");
+            run.setFailureSummary("旧规则算出的结论");
+            run.setFailureDigest("{}");
+            run.setFailureDigestVersion(1);
+            when(runMapper.selectById(1L)).thenReturn(run);
+            when(jobMapper.selectList(any())).thenReturn(List.of());
+
+            com.githublook.run.log.LogDigest old = new com.githublook.run.log.LogDigest(
+                    "failure", "test", "旧规则算出的结论",
+                    new com.githublook.run.log.LogDigest.Stats(10, 1, 8, 1),
+                    List.of(new com.githublook.run.log.LogDigest.Highlight(
+                            "error", "test", "测试失败", "FAILED tests/a.py", 5, 7, 1, List.of())));
+            // 版本校验不通过，但宽松解码能读出来
+            when(digestCodec.decode(any(), any())).thenReturn(java.util.Optional.empty());
+            when(digestCodec.decodeAny(any())).thenReturn(java.util.Optional.of(old));
+
+            RunDetailDto detail = service.detail(1L);
+
+            assertThat(detail.failureStale()).isTrue();
+            assertThat(detail.failureSummary()).isEqualTo("旧规则算出的结论");
+            assertThat(detail.failureJobName()).isEqualTo("Java · 构建");
+            assertThat(detail.failureHighlights()).hasSize(1);
+        }
+
+        @Test
+        @DisplayName("摘要版本最新时不标记 stale")
+        void freshDigestIsNotStale() {
+            WorkflowRun run = run(1, "completed", "failure");
+            run.setFailureSummary("新结论");
+            run.setFailureDigest("{}");
+            run.setFailureDigestVersion(3);
+            when(runMapper.selectById(1L)).thenReturn(run);
+            when(jobMapper.selectList(any())).thenReturn(List.of());
+
+            com.githublook.run.log.LogDigest fresh = new com.githublook.run.log.LogDigest(
+                    "failure", "test", "新结论",
+                    new com.githublook.run.log.LogDigest.Stats(10, 1, 8, 1), List.of());
+            when(digestCodec.decode(any(), any())).thenReturn(java.util.Optional.of(fresh));
+
+            RunDetailDto detail = service.detail(1L);
+
+            assertThat(detail.failureStale()).isFalse();
         }
 
         @Test

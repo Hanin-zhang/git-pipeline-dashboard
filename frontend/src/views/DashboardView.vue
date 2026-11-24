@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { EChartsOption } from 'echarts'
 import { dashboardApi, runsApi } from '@/api'
-import type { DashboardSummary, RunSummary, TrendPoint, WorkflowHealth } from '@/api/types'
+import type { DashboardSummary, FailureReasonStats, RunSummary, TrendPoint, WorkflowHealth } from '@/api/types'
 import BaseChart from '@/components/BaseChart.vue'
 import { useRunStream } from '@/composables/useRunStream'
 import { chartTheme } from '@/utils/echarts'
@@ -15,6 +15,7 @@ const { events, connected } = useRunStream()
 const summary = ref<DashboardSummary | null>(null)
 const trend = ref<TrendPoint[]>([])
 const workflows = ref<WorkflowHealth[]>([])
+const failureStats = ref<FailureReasonStats | null>(null)
 const recent = ref<RunSummary[]>([])
 const repos = ref<string[]>([])
 const branches = ref<string[]>([])
@@ -29,6 +30,8 @@ const chartsLoading = ref(true)
 
 interface FeedItem {
   key: string
+  /** 真实运行主键；此前是从 key 里 split 出来的，seed- 前缀会解析成 NaN 导致点击无效 */
+  runId: number
   event: string
   title: string
   repo: string
@@ -48,6 +51,7 @@ function toFeedFromRun(run: RunSummary): FeedItem {
   const at = run.completedAt || run.startedAt || new Date().toISOString()
   return {
     key: `seed-${run.id}`,
+    runId: run.id,
     event: run.conclusion ? `run.${run.conclusion === 'success' ? 'completed' : 'failed'}` : 'run.started',
     title: run.workflowName || '未命名工作流',
     repo: run.repoFullName,
@@ -75,12 +79,21 @@ const trendOption = computed<EChartsOption>(() => {
         const rows = params as Array<{ axisValue: string; seriesName: string; value: number; marker: string }>
         if (!rows.length) return ''
         const head = `<div style="font-weight:600;margin-bottom:4px">${rows[0].axisValue}</div>`
+        // 当天没有运行时成功率按 0% 画，提示里补一句说明，避免被读成「全军覆没」
+        const point = trend.value.find((p) => p.label === rows[0].axisValue)
+        const emptyDay = !!point && point.total === 0
         return (
           head +
           rows
             .map((r) => {
               const suffix = r.seriesName === '成功率' ? '%' : ''
-              return `<div style="display:flex;justify-content:space-between;gap:16px">${r.marker}${r.seriesName}<b>${r.value}${suffix}</b></div>`
+              const value = r.value
+              const missing = value === null || value === undefined || Number.isNaN(value)
+              let text = missing ? '—' : `${value}${suffix}`
+              if (!missing && r.seriesName === '成功率' && emptyDay) {
+                text = `${value}%（当天无运行）`
+              }
+              return `<div style="display:flex;justify-content:space-between;gap:16px">${r.marker}${r.seriesName}<b>${text}</b></div>`
             })
             .join('')
         )
@@ -140,11 +153,12 @@ const trendOption = computed<EChartsOption>(() => {
         name: '成功率',
         type: 'line',
         yAxisIndex: 1,
-        smooth: true,
+        // 直线而不是平滑曲线：成功率是离散的当日统计，曲线插值会让人以为中间的
+        // 下降是「逐渐恶化」，实际只是两天无数据
+        smooth: false,
         symbol: 'circle',
         symbolSize: 6,
-        // 没有运行的那天不画点，否则折线会被 0% 拉到底部造成「成功率暴跌」的错觉
-        connectNulls: false,
+        connectNulls: true,
         lineStyle: { width: 2.2, color: chartTheme.primary },
         itemStyle: { color: chartTheme.primary },
         areaStyle: {
@@ -160,7 +174,8 @@ const trendOption = computed<EChartsOption>(() => {
             ],
           },
         },
-        data: trend.value.map((p) => (p.total > 0 ? p.successRate : null)),
+        // 当天没有运行按 0% 画：折线不会出现断口，读者也能一眼看出那里是空的
+        data: trend.value.map((p) => (p.total > 0 ? p.successRate : 0)),
       },
     ],
   }
@@ -241,7 +256,7 @@ async function loadAll() {
   loading.value = true
   chartsLoading.value = true
   try {
-    const [summaryRes, trendRes, workflowRes, recentRes] = await Promise.all([
+    const [summaryRes, trendRes, workflowRes, failureRes, recentRes] = await Promise.all([
       dashboardApi.summary({ repo: repo.value || undefined, branch: branch.value || undefined }),
       dashboardApi.trend({
         days: days.value,
@@ -254,11 +269,17 @@ async function loadAll() {
         repo: repo.value || undefined,
         branch: branch.value || undefined,
       }),
+      dashboardApi.failureReasons({
+        days: days.value,
+        repo: repo.value || undefined,
+        branch: branch.value || undefined,
+      }),
       dashboardApi.recent(12),
     ])
     summary.value = summaryRes
     trend.value = trendRes
     workflows.value = workflowRes
+    failureStats.value = failureRes
     recent.value = recentRes
     if (!feed.value.length) {
       feed.value = recentRes.map(toFeedFromRun)
@@ -283,7 +304,7 @@ function scheduleRefresh() {
     // 事件到达后要把「所有依赖同一次聚合的区块」一起刷新：
     // 只刷指标卡和趋势图会让「工作流健康度 / 耗时对比」停在旧数据，
     // 同一屏里出现「失败 1 次」但「失败率 0.0%」这种自相矛盾。
-    const [summaryRes, trendRes, workflowRes] = await Promise.all([
+    const [summaryRes, trendRes, workflowRes, failureReasonRes] = await Promise.all([
       dashboardApi.summary({ repo: repo.value || undefined, branch: branch.value || undefined }),
       dashboardApi.trend({
         days: days.value,
@@ -296,10 +317,16 @@ function scheduleRefresh() {
         repo: repo.value || undefined,
         branch: branch.value || undefined,
       }),
+      dashboardApi.failureReasons({
+        days: days.value,
+        repo: repo.value || undefined,
+        branch: branch.value || undefined,
+      }),
     ])
     summary.value = summaryRes
     trend.value = trendRes
     workflows.value = workflowRes
+    failureStats.value = failureReasonRes
   }, 1200)
 }
 
@@ -310,6 +337,7 @@ watch(events, (list) => {
   feed.value = [
     {
       key: `${latest.data.runId}-${latest.receivedAt}`,
+      runId: latest.data.runId,
       event: latest.event,
       title: latest.data.workflowName || '未命名工作流',
       repo: latest.data.repoFullName,
@@ -474,7 +502,7 @@ function openRun(runId?: number) {
             class="stream-item"
             :class="{ fresh: item.fresh }"
             style="cursor: pointer"
-            @click="openRun(Number(item.key.split('-')[0]))"
+            @click="openRun(item.runId)"
           >
             <div
               class="stream-icon"
@@ -560,6 +588,60 @@ function openRun(runId?: number) {
         <div class="card-pad">
           <BaseChart :option="durationOption" :height="260" :loading="chartsLoading" />
         </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 16px">
+      <div class="card-head">
+        <div>
+          <div class="card-title">失败原因分布</div>
+          <div class="card-hint">近 {{ days }} 天 · 从失败的 job 日志自动归类</div>
+        </div>
+        <span v-if="failureStats && failureStats.totalFailed" class="text-muted" style="font-size: 12px">
+          {{ failureStats.totalFailed }} 次失败
+        </span>
+      </div>
+
+      <div v-if="!failureStats || failureStats.totalFailed === 0" class="reason-empty">
+        近 {{ days }} 天没有失败记录
+      </div>
+
+      <div v-else-if="!failureStats.reasons.length" class="reason-empty">
+        有 {{ failureStats.unclassified }} 次失败尚未归类
+        <div class="reason-tip">
+          {{
+            failureStats.known
+              ? '打开失败运行的 job 日志会自动归类'
+              : '配置 GITHUB_TOKEN 后可自动归类'
+          }}
+        </div>
+      </div>
+
+      <div v-else class="card-pad">
+        <div class="reason-list">
+          <div v-for="reason in failureStats.reasons" :key="reason.failureClass" class="reason-row">
+            <span class="reason-label">{{ reason.label }}</span>
+            <div class="bar-track" style="flex: 1">
+              <div
+                class="bar-fill"
+                :class="reason.failureClass === 'unknown' ? 'muted' : ''"
+                :style="{ width: `${Math.min(Math.max(reason.percent, 0), 100)}%` }"
+              />
+            </div>
+            <span class="reason-count">{{ reason.count }}</span>
+            <span class="reason-percent">{{ percent(reason.percent, 1) }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="failureStats && failureStats.unclassified > 0 && failureStats.reasons.length"
+        class="reason-foot"
+      >
+        另有 {{ failureStats.unclassified }} 次未归类
+        <span class="reason-tip">
+          {{ failureStats.known ? '· 打开对应运行的日志会自动补上' : '· 配置 GITHUB_TOKEN 后可自动归类' }}
+        </span>
       </div>
     </div>
   </div>

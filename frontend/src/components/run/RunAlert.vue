@@ -90,13 +90,6 @@ const liveElapsed = computed(() => {
         </div>
       </div>
 
-      <div class="alert-empty">
-        <el-icon><InfoFilled /></el-icon>
-        <span>
-          错误信息摘要：GitHub 的 workflow_run 事件不携带错误文本，当前数据源无法提供。
-          点击「查看日志」跳转到 GitHub 对应 job 查看完整输出。
-        </span>
-      </div>
     </template>
 
     <!-- 运行中 -->
@@ -246,15 +239,4 @@ const liveElapsed = computed(() => {
   flex: none;
 }
 
-.alert-empty {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed #ffd8d6;
-  font-size: 12px;
-  color: #a8716f;
-  line-height: 1.6;
-}
 </style>
