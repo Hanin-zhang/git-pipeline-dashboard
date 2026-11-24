@@ -1,13 +1,20 @@
-name: CD
+name: github-dashboard-CD
 
-# 只在「打标签」或「手动触发」时部署，避免每次 push 直接动生产
+# 两条触发路径：
+#   1. 打 tag（v*）→ 构建 → 部署 → 自动创建 GitHub Release
+#   2. 手动触发   → 指定镜像标签，用于回滚或重发
+#
+# 刻意不做「合并即部署」：
+# 部署时机应该由人决定（什么时候上线、白天还是半夜、要不要连带发版），
+# 而 tag 本身就是天然的版本号，出问题能精确定位到某次发布。
+# 日常开发靠 CI 把关即可，CD 只在明确要发布时介入。
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
       image_tag:
-        description: '要部署的镜像标签（默认 latest）'
+        description: '要部署的镜像标签（如 v1.9.1 或 latest）'
         required: true
         default: 'latest'
 
@@ -17,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write   # 打 tag 后自动创建 Release 需要
   packages: write
 
 env:
@@ -39,14 +46,14 @@ jobs:
       - name: 计算镜像标签
         id: meta
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.image_tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            workflow_dispatch) TAG="${{ inputs.image_tag }}" ;;
+            *)                 TAG="${GITHUB_REF_NAME}" ;;
+          esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "ns=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-          echo "本次部署：${GITHUB_REPOSITORY,,}-backend:$TAG"
+          echo "本次部署：${GITHUB_REPOSITORY,,}-backend:${TAG}"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -94,29 +101,46 @@ jobs:
         uses: appleboy/ssh-action@v1
         env:
           NEW_TAG: ${{ needs.build.outputs.tag }}
-          BACKEND_IMAGE: ${{ env.REGISTRY }}/${{ needs.build.outputs.ns }}-backend
-          WEB_IMAGE: ${{ env.REGISTRY }}/${{ needs.build.outputs.ns }}-web
+          # 传「仓库地址」，标签在脚本里拼，避免 compose 侧再拼一次
+          BACKEND_REPO: ${{ env.REGISTRY }}/${{ needs.build.outputs.ns }}-backend
+          WEB_REPO: ${{ env.REGISTRY }}/${{ needs.build.outputs.ns }}-web
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           command_timeout: 10m
-          envs: NEW_TAG,BACKEND_IMAGE,WEB_IMAGE
+          envs: NEW_TAG,BACKEND_REPO,WEB_REPO,GHCR_TOKEN
           script: |
             set -euo pipefail
             cd "${{ secrets.DEPLOY_PATH }}"
 
-            # 记住当前版本，回滚时要用
-            PREV_TAG=$(grep -E '^IMAGE_TAG=' .env | cut -d= -f2 || echo "latest")
-            echo "当前版本：$PREV_TAG  →  目标版本：$NEW_TAG"
+            # 私有镜像需要先登录；包设为 public 时可以不配这个 secret
+            if [ -n "${GHCR_TOKEN:-}" ]; then
+              echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null
+              echo "已登录 GHCR"
+            fi
+
+            PREV_TAG=$(grep -E '^DEPLOYED_TAG=' .env 2>/dev/null | cut -d= -f2 || true)
+            echo "当前版本：${PREV_TAG:-（未记录）}  →  目标版本：${NEW_TAG}"
+
+            set_kv() {
+              local key="$1" value="$2"
+              if grep -q "^${key}=" .env 2>/dev/null; then
+                # 用 | 作分隔符，避免镜像地址里的 / 引发转义问题
+                sed -i "s|^${key}=.*|${key}=${value}|" .env
+              else
+                echo "${key}=${value}" >> .env
+              fi
+            }
 
             deploy() {
               local tag="$1"
-              # 把镜像地址与标签写进 .env，compose 直接读
-              sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${tag}|; s|^BACKEND_IMAGE=.*|BACKEND_IMAGE=${BACKEND_IMAGE}|; s|^WEB_IMAGE=.*|WEB_IMAGE=${WEB_IMAGE}|" .env
-              grep -q '^IMAGE_TAG=' .env    || echo "IMAGE_TAG=${tag}" >> .env
-              grep -q '^BACKEND_IMAGE=' .env || echo "BACKEND_IMAGE=${BACKEND_IMAGE}" >> .env
-              grep -q '^WEB_IMAGE=' .env     || echo "WEB_IMAGE=${WEB_IMAGE}" >> .env
+              # 完整镜像引用（含标签）直接写进 .env：compose 里是 ${BACKEND_IMAGE}，
+              # 不需要它再拼一次 IMAGE_TAG —— 之前那版就是这里丢了标签，永远拉 latest
+              set_kv BACKEND_IMAGE "${BACKEND_REPO}:${tag}"
+              set_kv WEB_IMAGE "${WEB_REPO}:${tag}"
+              set_kv DEPLOYED_TAG "${tag}"
 
               docker compose pull backend web
               docker compose up -d --no-build backend web
@@ -137,6 +161,11 @@ jobs:
             if deploy "$NEW_TAG"; then
               echo "部署成功：$NEW_TAG"
             else
+              if [ -z "${PREV_TAG:-}" ] || [ "$PREV_TAG" = "$NEW_TAG" ]; then
+                echo "❌ 没有可回滚的历史版本，需要人工介入"
+                docker compose logs --tail 60 backend || true
+                exit 1
+              fi
               echo "回滚到 $PREV_TAG"
               docker compose logs --tail 60 backend || true
               deploy "$PREV_TAG" || { echo "回滚同样失败，需要人工介入"; exit 1; }
@@ -153,3 +182,73 @@ jobs:
             cd "${{ secrets.DEPLOY_PATH }}"
             docker compose ps
             docker compose logs --tail 20 backend | grep -E "Starting GithubLook|Successfully applied|Migrating" || true
+
+  # ------------------------------------------------ 打 tag 时顺带发行
+  # 不再手工打 release 目录：tag 就是版本的唯一真相，
+  # 附件由流水线现场构建，保证「Release 里的东西 == 线上跑的东西」。
+  release:
+    name: 创建 Release
+    needs: [build, deploy]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 构建后端 jar
+        working-directory: backend
+        run: mvn -B -ntp package -DskipTests
+
+      - name: 构建前端产物
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: 记录部署信息
+        run: |
+          {
+            echo "## 已发布 ${GITHUB_REF_NAME}"
+            echo ""
+            echo "| 项目 | 地址 |"
+            echo "| --- | --- |"
+            echo "| 后端镜像 | \`${{ env.REGISTRY }}/${{ needs.build.outputs.ns }}-backend:${{ github.ref_name }}\` |"
+            echo "| 前端镜像 | \`${{ env.REGISTRY }}/${{ needs.build.outputs.ns }}-web:${{ github.ref_name }}\` |"
+            echo ""
+            echo "附件校验：\`sha256sum -c SHA256SUMS\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 打附件
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          JAR=$(ls backend/target/*.jar | head -1)
+          cp "$JAR" "github-look-backend-${TAG}.jar"
+          tar czf "github-look-frontend-${TAG}.tar.gz" -C frontend dist
+          sha256sum "github-look-backend-${TAG}.jar" "github-look-frontend-${TAG}.tar.gz" > SHA256SUMS
+          ls -lh github-look-* SHA256SUMS
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          # 变更内容由 GitHub 自动生成（对比上一个 tag 的提交与 PR）。
+          # 这里不能同时给 body —— 一旦指定 body，自动生成的说明会被完全覆盖。
+          generate_release_notes: true
+          files: |
+            github-look-backend-${{ github.ref_name }}.jar
+            github-look-frontend-${{ github.ref_name }}.tar.gz
+            SHA256SUMS
