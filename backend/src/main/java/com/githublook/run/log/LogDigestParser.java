@@ -133,6 +133,9 @@ public final class LogDigestParser {
             primary("dependency", "could not find a version that satisfies|no matching distribution"),
             primary("dependency", "modulenotfounderror|importerror: no module"),
             primary("dependency", "could not resolve dependencies|could not resolve artifact"),
+            // setup-node/setup-python 找不到锁文件：job 在准备阶段就挂，测试根本没跑
+            primary("dependency", "unable to cache dependencies|dependencies lock file is not found"),
+            primary("dependency", "npm ci can only install packages when your"),
             detail("dependency", "cannot find module '[^']+'"),
 
             // ---- 超时 ----
@@ -300,6 +303,21 @@ public final class LogDigestParser {
     private record Block(int startLine, String category) {
     }
 
+    /**
+     * runner / 构建工具输出的记账行：出现即代表「这段错误已经讲完」。
+     *
+     * <p>典型的是 {@code Post job cleanup.}、{@code [command]/usr/bin/git version}、
+     * {@code [INFO] ...}、{@code ##[endgroup]}——它们不是错误内容，
+     * 但紧跟在错误后面，不掐断就会被拼进摘要正文，读起来莫名其妙。
+     */
+    private static boolean isBookkeeping(String line) {
+        return line.startsWith("[INFO]")
+                || line.startsWith("[WARNING]")
+                || line.startsWith("[command]")
+                || line.startsWith("##[")
+                || line.startsWith("Post job cleanup");
+    }
+
     private static boolean isWarnLine(String line) {
         Matcher matcher = LOG_LEVEL.matcher(line);
         return matcher.find();
@@ -390,6 +408,10 @@ public final class LogDigestParser {
             if (line.startsWith("at ") && line.contains("(") && line.endsWith(")")) {
                 continue;
             }
+            // runner 的记账行：整段错误已经结束，别再往下吞
+            if (isBookkeeping(line)) {
+                break;
+            }
             Rule rule = matchRule(line);
             if (rule != null && rule.evidence() != Evidence.DETAIL) {
                 break;
@@ -442,7 +464,7 @@ public final class LogDigestParser {
             if (line.isEmpty()) {
                 continue;
             }
-            if (line.startsWith("[INFO]") || line.startsWith("[WARNING]") || line.startsWith("##[")) {
+            if (isBookkeeping(line)) {
                 break;
             }
             Rule rule = matchRule(line);
@@ -539,9 +561,9 @@ public final class LogDigestParser {
             case "timeout" -> "执行超时被终止";
             case "permission" -> "权限不足，无法访问所需资源";
             case "network" -> "网络异常，无法连接外部服务";
-            default -> highlights.isEmpty()
-                    ? "日志中出现错误输出"
-                    : truncate(highlights.get(0).detail());
+            // 认不出来时不要拿某一行顶替结论：之前把 setup-node 的
+            // "unable to cache dependencies" 当成失败原因展示，读起来像天书
+            default -> "日志中出现错误输出，未能归类";
         };
     }
 

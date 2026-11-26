@@ -6,7 +6,7 @@
 
 | | |
 | --- | --- |
-| **当前版本** | `1.9.1` |
+| **当前版本** | `1.9.2` |
 | **技术栈** | JDK 21（虚拟线程）· Spring Boot 3.3 · MyBatis-Plus 3.5 · Flyway · Redis 7 · MySQL 8 / H2 · Vue 3 + Vite 6 + Element Plus + ECharts |
 | **部署形态** | Docker Compose（MySQL + Redis + 后端 + Nginx），也支持本地直跑 |
 
@@ -282,6 +282,7 @@ scripts/         dev.sh、simulate_webhook.py
 
 | 版本 | 内容 |
 | --- | --- |
+| `1.9.2` | 依赖准备类失败（锁文件缺失 / npm ci 不同步）正确归类；unknown 不再拿噪声行当结论；摘要不再吞 runner 收尾命令 |
 | `1.9.1` | 点击摘要高亮整段错误（含 Mockito 说明与堆栈）；选中文字不再误触抽屉 |
 | `1.9.0` | 旧版摘要降级展示（stale 标记 + 折叠卡片 + 重新分析）；历史摘要回刷任务（夜间 + 手动接口） |
 | `1.8.1` | 删除过时的「事件不携带错误文本」提示；修复摘要跨 job 串用（通过 job 的抽屉不再显示失败 job 的结论） |

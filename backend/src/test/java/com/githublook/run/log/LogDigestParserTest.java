@@ -349,6 +349,43 @@ class LogDigestParserTest {
             assertThat(digest.failureClass()).isEqualTo("permission");
         }
 
+
+        @Test
+        @DisplayName("setup-node 找不到锁文件 → 归为依赖问题，而不是 unknown")
+        void setupNodeCacheFailureIsDependency() {
+            // 现场（CI #2，main@4b2b00b）：job 在装 Node 阶段就挂了，测试一行没跑
+            LogDigest digest = LogDigestParser.parse(withTimestamps(
+                    "##[group]Run actions/setup-node@v4",
+                    "Found in cache @ /opt/hostedtoolcache/node/22.23.5/x64",
+                    "##[error]Some specified paths were not resolved, unable to cache dependencies.",
+                    "Post job cleanup."));
+
+            assertThat(digest.failureClass()).isEqualTo("dependency");
+            assertThat(digest.headline()).contains("依赖");
+            // 正文里不该只有那句天书，也要带上原始行供核对
+            assertThat(digest.highlights()).isNotEmpty();
+        }
+
+        @Test
+        @DisplayName("npm ci 与 lockfile 版本不一致 → 依赖问题")
+        void npmCiOutOfSyncIsDependency() {
+            LogDigest digest = LogDigestParser.parse(withTimestamps(
+                    "npm ci can only install packages when your package.json and package-lock.json "
+                            + "or npm-shrinkwrap.json are in sync. Please update your lock file with `npm install`."));
+
+            assertThat(digest.failureClass()).isEqualTo("dependency");
+        }
+
+        @Test
+        @DisplayName("认不出来的日志不再拿某一行冒充结论")
+        void unknownDoesNotPromoteNoise() {
+            LogDigest digest = LogDigestParser.parse(withTimestamps(
+                    "##[error]Something went sideways with code 9"));
+
+            assertThat(digest.failureClass()).isEqualTo("unknown");
+            assertThat(digest.headline()).isEqualTo("日志中出现错误输出，未能归类");
+        }
+
         @Test
         @DisplayName("存在更强的构建错误时，WARN 权限行降级为上下文")
         void warnPermissionDemotedWhenBuildFails() {

@@ -22,7 +22,7 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class LogDigestCodec {
 
-    public static final int VERSION = 4;
+    public static final int VERSION = 5;
 
     private final ObjectMapper objectMapper;
 
